@@ -168,6 +168,16 @@
     <div style="margin-top:6px; color:#6b7280; font-size:.82rem;">Tempo locks to your target cadence; the arrangement thickens on work intervals and breaks down on recovery, re-randomizing each 4-bar phrase. Synthesized live with Tone.js — needs internet to load the library once.</div>
   </div>
 
+  <div id="voicecard" class="card-ready">
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+      <strong>Voice coaching</strong>
+      <button id="voiceToggle" class="ghost">🔇 Off</button>
+      <label>Voice <select id="voiceSel" class="ghost"></select></label>
+      <button id="voiceTest" class="ghost">Test</button>
+      <span style="color:#6b7280; font-size:.82rem;">Announces the next block a few seconds early + a 3-2-1, so you can ride watching your show, not the screen. ★ = higher-quality voice (best in Edge).</span>
+    </div>
+  </div>
+
   <div id="rescoach" class="card-ready">
     <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
       <strong>Resistance prediction</strong>
@@ -372,7 +382,7 @@ function tick() {
   const cb = currentBlock(t);
   if (!cb) { requestAnimationFrame(tick); return; }
   const { blk, i, tLeft } = cb;
-  if (i !== lastBlockIdx) { const prev=lastBlockIdx; lastBlockIdx=i; beepBlockChange(blk, prev); if(musicOn) MUSIC.setBlock(blk); segEls.forEach((e,k)=>e.classList.toggle('active',k===i)); }
+  if (i !== lastBlockIdx) { const prev=lastBlockIdx; lastBlockIdx=i; beepBlockChange(blk, prev); if(musicOn) MUSIC.setBlock(blk); segEls.forEach((e,k)=>e.classList.toggle('active',k===i)); vAnnounced=false; vCountLast=0; }
   const tgtW = blockTargetWatts(blk, blk.sec - tLeft);
 
   $('blockName').textContent = blk.name;
@@ -381,6 +391,10 @@ function tick() {
   $('clock').textContent = fmt(tLeft);
   const nxt = workout[i+1];
   $('nextUp').textContent = nxt ? `Next: ${nxt.name} · ${nxt.zone==='Z1'?'recover':blockTargetWatts(nxt,0)+' W'} (${fmt(nxt.sec)})` : 'Last block — finish strong';
+  if (voiceOn) {
+    if (nxt && !vAnnounced && tLeft<=8) { vAnnounced=true; say(announceText(nxt)); }      // pre-announce, hides latency
+    if (nxt) { const cd=Math.ceil(tLeft); if (cd>=1 && cd<=3 && cd!==vCountLast) { vCountLast=cd; say(String(cd), true); } }  // 3-2-1
+  }
 
   $('pTgt').textContent = tgtW;
   $('cTgt').textContent = blk.cadence;
@@ -416,13 +430,13 @@ function togglePause(){ if (!running) return; if (!paused){ paused=true; pauseSt
   else { paused=false; pausedMs+=performance.now()-pauseStart; $('pause').textContent='Pause'; if(musicOn) MUSIC.resume(); } }
 function skip(){ if (!running) return; const t=elapsed(); const cb=currentBlock(t); if (cb) skipShift += cb.tLeft + 0.01; }
 function seekToBlock(i){ if(!workout.length) return; if(!running) start(); let t=0; for(let k=0;k<i;k++) t+=workout[k].sec; skipShift += t - elapsed() + 0.01; }
-function reset(){ running=false; paused=false; lastBlockIdx=-1; MUSIC.stop(); segEls.forEach(e=>e.classList.remove('active')); $('pause').textContent='Pause';
+function reset(){ running=false; paused=false; lastBlockIdx=-1; MUSIC.stop(); if('speechSynthesis' in window) speechSynthesis.cancel(); segEls.forEach(e=>e.classList.remove('active')); $('pause').textContent='Pause';
   $('start').disabled=false; $('pause').disabled=true; $('skip').disabled=true; $('reset').disabled=true;
   $('blockName').textContent='— Press Start —'; $('zoneChip').textContent='READY'; $('zoneChip').style.background='#3b82f6';
   $('clock').textContent='0:00'; $('nextUp').textContent=''; $('guide').textContent='Ready when you are.'; $('progBar').style.width='0%'; $('rTgt').textContent=''; }
 function finish(){ running=false; $('blockName').textContent='✓ Workout complete'; $('zoneChip').textContent='DONE'; $('zoneChip').style.background='#4ade80';
   $('clock').textContent='0:00'; $('guide').textContent='Nice work. Cool down and stretch.'; $('guide').style.background='#14361f'; $('progBar').style.width='100%';
-  $('pause').disabled=true; $('skip').disabled=true; $('start').disabled=false; playTones([700,900,1175]); MUSIC.stop(); }
+  $('pause').disabled=true; $('skip').disabled=true; $('start').disabled=false; playTones([700,900,1175]); MUSIC.stop(); say('Workout complete. Nice work.'); }
 
 /* ---------------- Document Picture-in-Picture ---------------- */
 let pipWin=null;
@@ -696,6 +710,35 @@ const MUSIC = (()=>{
 })();
 let musicOn=false;
 
+/* ---------------- voice coaching (Web Speech API) ---------------- */
+let voiceOn=false, ttsVoice=null, vAnnounced=false, vCountLast=0;
+function ttsVoices(){ return ('speechSynthesis' in window) ? speechSynthesis.getVoices() : []; }
+function ttsScore(v){ const n=v.name.toLowerCase();
+  if(/google uk english male/.test(n)) return 5;        // best available on Chrome/macOS, default it
+  return (/natural|online/.test(n)?3:0)+(/siri|enhanced|premium/.test(n)?2:0)+(/google/.test(n)?1:0); }
+function ttsPickBest(list){ const en=list.filter(v=>/^en/i.test(v.lang)); const pool=en.length?en:list; return pool.slice().sort((a,b)=>ttsScore(b)-ttsScore(a))[0]||null; }
+function populateVoices(){
+  const sel=$('voiceSel'); if(!sel) return;
+  const all=ttsVoices(), en=all.filter(v=>/^en/i.test(v.lang)), pool=en.length?en:all;
+  sel.innerHTML='';
+  pool.forEach(v=>{ const o=document.createElement('option'); o.value=v.name; o.textContent=v.name.replace(/\s*\(.*?\)/,'').trim()+(ttsScore(v)?' ★':''); sel.appendChild(o); });
+  if(!ttsVoice){ const saved=localStorage.getItem('ic4voice'); ttsVoice = pool.find(v=>v.name===saved) || ttsPickBest(pool); }
+  if(ttsVoice) sel.value=ttsVoice.name;
+}
+function say(text, urgent){
+  if(!voiceOn || !('speechSynthesis' in window) || !text) return;
+  if(urgent) speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text);
+  if(ttsVoice) u.voice=ttsVoice;
+  u.rate=1.08; u.pitch=1.06; u.volume=1;
+  speechSynthesis.speak(u);
+}
+function announceText(b){
+  const w=blockTargetWatts(b,0);
+  if(['Z1','Z2'].includes(b.zone)) return `Next: ${/recov/i.test(b.name)?'recovery':'easy'}, ${w} watts`;
+  return `Next: ${w} watts for ${b.sec} seconds`;
+}
+
 /* ---------------- wire up ---------------- */
 $('connect').onclick=connectBike;
 $('connect-hr').onclick=connectHR;
@@ -723,6 +766,10 @@ $('musicVol').oninput=e=>MUSIC.setVol((+e.target.value)/100);
 $('resReset').onclick=()=>{ resFit={...RES_BLANK}; resLocked=false; localStorage.setItem('ic4reslock','0'); $('resLock').textContent='Lock model'; saveResFit(); updateResBadge(); };
 $('resLock').onclick=()=>{ resLocked=!resLocked; localStorage.setItem('ic4reslock', resLocked?'1':'0'); $('resLock').textContent=resLocked?'Unlock model':'Lock model'; updateResBadge(); };
 $('resLock').textContent = resLocked?'Unlock model':'Lock model';
+if('speechSynthesis' in window){ populateVoices(); speechSynthesis.onvoiceschanged=populateVoices; }
+$('voiceToggle').onclick=()=>{ voiceOn=!voiceOn; $('voiceToggle').textContent=voiceOn?'🔊 On':'🔇 Off'; if(voiceOn){ if(!ttsVoice) ttsVoice=ttsPickBest(ttsVoices()); say('Voice coaching on'); } else if('speechSynthesis' in window) speechSynthesis.cancel(); };
+$('voiceSel').onchange=e=>{ ttsVoice=ttsVoices().find(v=>v.name===e.target.value)||ttsVoice; localStorage.setItem('ic4voice', e.target.value); const was=voiceOn; voiceOn=true; say("Hi, I'm your coach. Let's ride."); voiceOn=was; };
+$('voiceTest').onclick=()=>{ const was=voiceOn; voiceOn=true; say("Three, two, one, go! Two hundred forty watts."); voiceOn=was; };
 if (localStorage.getItem('ic4ftp')) $('ftp').value=localStorage.getItem('ic4ftp');
 if (localStorage.getItem('ic4dur')) $('dur').value=localStorage.getItem('ic4dur');
 if (!navigator.bluetooth) { $('status').textContent='No Web Bluetooth — use desktop Chrome/Edge.'; $('connect').disabled=true; }
