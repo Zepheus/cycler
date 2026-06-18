@@ -35,6 +35,7 @@
 
   .secondary { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:12px; }
   .secondary .metric .cur { font-size:clamp(1.3rem, 6vw, 1.8rem); }
+  .secondary .metric .tgt { font-size:.8rem; }
 
   .guide { margin-top:14px; text-align:center; font-size:1.25rem; font-weight:700; padding:10px; border-radius:10px; background:#0d0d0f; }
 
@@ -43,8 +44,10 @@
 
   /* timeline preview */
   #timeline { display:flex; height:46px; border-radius:8px; overflow:hidden; background:#0d0d0f; }
-  #timeline .seg { position:relative; }
-  #timeline .seg .mark { position:absolute; inset:0; opacity:.85; }
+  #timeline .seg { position:relative; cursor:pointer; }
+  #timeline .seg:hover .mark { opacity:1; filter:brightness(1.15); }
+  #timeline .seg.active .mark { outline:2px solid #fff; outline-offset:-2px; opacity:1; }
+  #timeline .seg .mark { position:absolute; inset:0; opacity:.9; display:flex; align-items:center; justify-content:center; font-size:.58rem; font-weight:800; color:#06121f; overflow:hidden; white-space:nowrap; }
   #plan-meta { color:#9ca3af; font-size:.9rem; }
   .pip-note { color:#6b7280; font-size:.85rem; }
   .card-ready { background:#17171b; border-radius:12px; padding:14px; }
@@ -86,7 +89,7 @@
     <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
       <strong>Readiness</strong>
       <span id="readyBadge" class="ready-badge">Not checked</span>
-      <button id="readyStart" class="ghost">Check readiness (H10)</button>
+      <button id="readyStart" class="ghost">Measure (sit still, 2½m)</button>
       <select id="readyOverride" class="ghost" title="Override the HRV call if you disagree">
         <option value="auto">Auto (HRV)</option>
         <option value="full">Override · full intensity</option>
@@ -96,6 +99,7 @@
       <span id="readyMsg" style="color:#9ca3af; font-size:.9rem;"></span>
     </div>
     <div id="readyDetail" style="margin-top:8px; color:#9ca3af; font-size:.9rem;"></div>
+    <div style="margin-top:6px; color:#6b7280; font-size:.82rem;">Resting check, <b>before</b> you ride — wear the H10, sit still and don't pedal for ~2½ min (same time/posture each day works best). After ~4 daily readings it sets your baseline, then scales today's plan: <b>green</b> = full intensity, <b>amber</b> = ~7% easier, <b>red</b> = swapped to an endurance ride. Disagree? Override with the dropdown.</div>
   </div>
 
   <div>
@@ -128,7 +132,7 @@
 
     <div class="secondary">
       <div class="metric"><div class="lab">Heart rate</div><div class="cur" id="hrCur">—</div></div>
-      <div class="metric"><div class="lab">Resistance</div><div class="cur" id="rCur">—</div></div>
+      <div class="metric"><div class="lab">Resistance</div><div class="cur" id="rCur">—</div><div class="tgt" id="rTgt"></div></div>
       <div class="metric"><div class="lab">Speed</div><div class="cur" id="sCur">—</div></div>
     </div>
 
@@ -158,12 +162,6 @@
           <option value="lofi">Lo-fi (chill)</option>
         </select>
       </label>
-      <label>Key
-        <select id="musicKey" class="ghost">
-          <option value="45">A</option><option value="48">C</option><option value="50">D</option>
-          <option value="52">E</option><option value="53">F</option><option value="55">G</option>
-        </select>
-      </label>
       <label>Vol <input id="musicVol" type="range" min="0" max="100" value="65" style="vertical-align:middle"></label>
       <span id="musicMsg" style="color:#9ca3af; font-size:.9rem;"></span>
     </div>
@@ -174,8 +172,9 @@
     <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
       <strong>Resistance prediction</strong>
       <span id="resModel" class="ready-badge">Learning…</span>
-      <button id="resReset" class="ghost">Reset calibration</button>
-      <span style="color:#6b7280; font-size:.82rem;">Learns your IC4's power = f(cadence, resistance) as you ride, then suggests the exact knob level for each target.</span>
+      <button id="resLock" class="ghost">Lock model</button>
+      <button id="resReset" class="ghost">Reset</button>
+      <span id="resCoef" style="color:#6b7280; font-size:.82rem;">Calibrates automatically once you ride across a few resistance levels (e.g. a work interval plus a recovery) — not just time. Until then it gives up/down hints.</span>
     </div>
   </div>
 </div>
@@ -220,18 +219,38 @@ function parseHR(dv) {
   state.hr = (flags&1) ? dv.getUint16(off,true) : dv.getUint8(off);
 }
 
+let bikeDevice=null, wantBike=false, reconnTimer=null, autoPausedDC=false;
+async function subscribeBike(server){
+  const srv = await server.getPrimaryService('fitness_machine');
+  const ch = await srv.getCharacteristic('indoor_bike_data');
+  await ch.startNotifications();
+  ch.addEventListener('characteristicvaluechanged', e=>parseBike(e.target.value));
+}
 async function connectBike() {
   try {
     $('status').textContent='Requesting bike…';
-    const dev = await navigator.bluetooth.requestDevice({ filters:[{services:['fitness_machine']}], optionalServices:['heart_rate'] });
-    const srv = await (await dev.gatt.connect()).getPrimaryService('fitness_machine');
-    const ch = await srv.getCharacteristic('indoor_bike_data');
-    await ch.startNotifications();
-    ch.addEventListener('characteristicvaluechanged', e=>parseBike(e.target.value));
-    dev.addEventListener('gattserverdisconnected', ()=>$('status').textContent='Bike disconnected.');
+    bikeDevice = await navigator.bluetooth.requestDevice({ filters:[{services:['fitness_machine']}], optionalServices:['heart_rate'] });
+    bikeDevice.addEventListener('gattserverdisconnected', onBikeDisconnected);
+    wantBike=true;
+    await subscribeBike(await bikeDevice.gatt.connect());
     $('status').textContent='Bike connected — pedal.';
     $('start').disabled=false;
   } catch(err){ $('status').textContent='Bike error: '+err.message; }
+}
+function onBikeDisconnected(){
+  if(!wantBike) return;
+  $('status').textContent='Bike asleep — pedal to wake, auto-reconnecting…';
+  if(running && !paused){ autoPausedDC=true; togglePause(); }   // freeze the clock while it's away
+  scheduleReconnect();
+}
+function scheduleReconnect(){ if(!wantBike) return; clearTimeout(reconnTimer); reconnTimer=setTimeout(tryReconnect, 2500); }
+async function tryReconnect(){
+  if(!wantBike || !bikeDevice) return;
+  try {
+    await subscribeBike(await bikeDevice.gatt.connect());
+    $('status').textContent='Bike reconnected — keep going.';
+    if(autoPausedDC){ autoPausedDC=false; if(paused) togglePause(); }   // resume exactly where we paused
+  } catch { scheduleReconnect(); }   // still asleep → keep trying until it advertises
 }
 async function connectHR() {
   try {
@@ -301,9 +320,12 @@ function renderPlan() {
   workout = buildWorkout(ftp, dur);
   totalSec = workout.reduce((s,b)=>s+b.sec,0);
   localStorage.setItem('ic4ftp', ftp); localStorage.setItem('ic4dur', dur);
-  const tl = $('timeline'); tl.innerHTML='';
-  workout.forEach(b=>{ const seg=document.createElement('div'); seg.className='seg'; seg.style.flex=b.sec;
-    const m=document.createElement('div'); m.className='mark'; m.style.background=ZONES[b.zone].col; seg.appendChild(m); tl.appendChild(seg); });
+  const tl = $('timeline'); tl.innerHTML=''; segEls=[];
+  workout.forEach((b,idx)=>{ const seg=document.createElement('div'); seg.className='seg'; seg.style.flex=b.sec;
+    const w = b.watts!=null ? b.watts : Math.round((b.ramp[0]+b.ramp[1])/2);
+    seg.title = `${b.name} · ${fmt(b.sec)} · ${w} W — click to jump`;
+    seg.onclick = ()=>seekToBlock(idx);
+    const m=document.createElement('div'); m.className='mark'; m.style.background=ZONES[b.zone].col; m.textContent=w+'W'; seg.appendChild(m); tl.appendChild(seg); segEls.push(seg); });
   const mm=Math.round(totalSec/60);
   const mode = readiness.mode==='easy'
     ? 'Endurance ride (HRV: recover)'
@@ -312,7 +334,7 @@ function renderPlan() {
 }
 
 /* ---------------- run clock ---------------- */
-let running=false, paused=false, startMs=0, pausedMs=0, pauseStart=0, skipShift=0;
+let running=false, paused=false, startMs=0, pausedMs=0, pauseStart=0, skipShift=0, segEls=[];
 function elapsed() { if (!running) return 0; const now=performance.now(); const p = paused ? now-pauseStart : 0; return (now - startMs - pausedMs - p)/1000 + skipShift; }
 function currentBlock(t) {
   let acc=0; for (let i=0;i<workout.length;i++){ if (t < acc+workout[i].sec) return {blk:workout[i], i, tIn:t-acc, tLeft:acc+workout[i].sec-t}; acc+=workout[i].sec; }
@@ -350,7 +372,7 @@ function tick() {
   const cb = currentBlock(t);
   if (!cb) { requestAnimationFrame(tick); return; }
   const { blk, i, tLeft } = cb;
-  if (i !== lastBlockIdx) { const prev=lastBlockIdx; lastBlockIdx=i; beepBlockChange(blk, prev); if(musicOn) MUSIC.setBlock(blk); }
+  if (i !== lastBlockIdx) { const prev=lastBlockIdx; lastBlockIdx=i; beepBlockChange(blk, prev); if(musicOn) MUSIC.setBlock(blk); segEls.forEach((e,k)=>e.classList.toggle('active',k===i)); }
   const tgtW = blockTargetWatts(blk, blk.sec - tLeft);
 
   $('blockName').textContent = blk.name;
@@ -380,6 +402,8 @@ function tick() {
   else if (pa.cls==='under') { g = ca.cls==='under' ? '▲ Spin up toward '+blk.cadence+' rpm, then add resistance' : '▲ Add resistance (knob up)'; gcol='#3a3413'; }
   else { g = '▼ Ease resistance (knob down)'; gcol='#3a1717'; }
   $('guide').textContent=g; $('guide').style.background=gcol;
+  if (predR!=null) { const rcls = state.resistance==null ? '' : (Math.abs(state.resistance-predR)<=2?'on':(state.resistance<predR?'under':'over')); $('rTgt').innerHTML=`<span class="${rcls}">→ ${predR}</span>`; }
+  else $('rTgt').textContent='';
 
   $('progBar').style.width = (100*t/totalSec).toFixed(1)+'%';
   requestAnimationFrame(tick);
@@ -391,10 +415,11 @@ function start(){ if (!workout.length) renderPlan(); ensureAudio(); lastBlockIdx
 function togglePause(){ if (!running) return; if (!paused){ paused=true; pauseStart=performance.now(); $('pause').textContent='Resume'; if(musicOn) MUSIC.pause(); }
   else { paused=false; pausedMs+=performance.now()-pauseStart; $('pause').textContent='Pause'; if(musicOn) MUSIC.resume(); } }
 function skip(){ if (!running) return; const t=elapsed(); const cb=currentBlock(t); if (cb) skipShift += cb.tLeft + 0.01; }
-function reset(){ running=false; paused=false; lastBlockIdx=-1; MUSIC.stop(); $('pause').textContent='Pause';
+function seekToBlock(i){ if(!workout.length) return; if(!running) start(); let t=0; for(let k=0;k<i;k++) t+=workout[k].sec; skipShift += t - elapsed() + 0.01; }
+function reset(){ running=false; paused=false; lastBlockIdx=-1; MUSIC.stop(); segEls.forEach(e=>e.classList.remove('active')); $('pause').textContent='Pause';
   $('start').disabled=false; $('pause').disabled=true; $('skip').disabled=true; $('reset').disabled=true;
   $('blockName').textContent='— Press Start —'; $('zoneChip').textContent='READY'; $('zoneChip').style.background='#3b82f6';
-  $('clock').textContent='0:00'; $('nextUp').textContent=''; $('guide').textContent='Ready when you are.'; $('progBar').style.width='0%'; }
+  $('clock').textContent='0:00'; $('nextUp').textContent=''; $('guide').textContent='Ready when you are.'; $('progBar').style.width='0%'; $('rTgt').textContent=''; }
 function finish(){ running=false; $('blockName').textContent='✓ Workout complete'; $('zoneChip').textContent='DONE'; $('zoneChip').style.background='#4ade80';
   $('clock').textContent='0:00'; $('guide').textContent='Nice work. Cool down and stretch.'; $('guide').style.background='#14361f'; $('progBar').style.width='100%';
   $('pause').disabled=true; $('skip').disabled=true; $('start').disabled=false; playTones([700,900,1175]); MUSIC.stop(); }
@@ -496,11 +521,11 @@ async function startReadiness(){
         +(live?` · lnRMSSD ${(Math.log(live)*20).toFixed(1)}`:'')+(rrAll.length?` · ${rrAll.length} beats`:'');
       if(t>=HRV_WINDOW) finishReadiness();
     },1000);
-  }catch(err){ $('readyMsg').textContent='H10 error: '+err.message; measuring=false; $('readyStart').textContent='Check readiness (H10)'; }
+  }catch(err){ $('readyMsg').textContent='H10 error: '+err.message; measuring=false; $('readyStart').textContent='Measure (sit still, 2½m)'; }
 }
 function finishReadiness(){
   measuring=false; if(measIv){ clearInterval(measIv); measIv=null; }
-  $('readyStart').textContent='Check readiness (H10)';
+  $('readyStart').textContent='Measure (sit still, 2½m)';
   const r=rmssd(rrAll);
   if(!r || rrAll.length<20){ $('readyMsg').textContent='Not enough clean beats — strap snug + electrodes wet, then retry.'; return; }
   const ln=Math.log(r)*20;
@@ -514,7 +539,7 @@ function toggleReadiness(){
   if(!measuring){ startReadiness(); return; }
   const t=(performance.now()-measT0)/1000;
   if(t>=HRV_DISCARD+30) finishReadiness();                 // enough data → compute
-  else { measuring=false; if(measIv)clearInterval(measIv); $('readyStart').textContent='Check readiness (H10)'; $('readyMsg').textContent='Stopped (need ≥60s).'; }
+  else { measuring=false; if(measIv)clearInterval(measIv); $('readyStart').textContent='Measure (sit still, 2½m)'; $('readyMsg').textContent='Stopped (need ≥60s).'; }
 }
 
 /* ---------------- sound (subtle zone-change beep) ---------------- */
@@ -534,15 +559,21 @@ function beepBlockChange(blk, prevIdx){
    Magnetic-brake model: power ≈ cadence × torque, torque ≈ a·resistance + b.
    So fit y = P/C against x = R by least squares, then invert for a target.   */
 const RES_BLANK = {n:0,Sx:0,Sy:0,Sxx:0,Sxy:0,Rmin:1e9,Rmax:-1e9};
+// Bake in a fixed calibration to skip learning, e.g. HARDCODE_FIT = {a:0.012, b:0.4}
+// (from fitting P/cadence = a*resistance + b). Leave null to learn live.
+const HARDCODE_FIT = null;
 let resFit = (()=>{ try{ return JSON.parse(localStorage.getItem('ic4resfit')) || {...RES_BLANK}; }catch{ return {...RES_BLANK}; } })();
+let resLocked = localStorage.getItem('ic4reslock')==='1';
 let lastResSample = 0;
 function saveResFit(){ localStorage.setItem('ic4resfit', JSON.stringify(resFit)); }
 function resAddSample(C, R, P){
+  if(HARDCODE_FIT || resLocked) return;                 // frozen → no more learning
   if(C==null||R==null||P==null||C<40||P<10) return;
   const x=R, y=P/C, f=resFit;
   f.n++; f.Sx+=x; f.Sy+=y; f.Sxx+=x*x; f.Sxy+=x*y; f.Rmin=Math.min(f.Rmin,R); f.Rmax=Math.max(f.Rmax,R);
 }
 function resCoef(){
+  if(HARDCODE_FIT) return HARDCODE_FIT;
   const f=resFit; if(f.n<20 || (f.Rmax-f.Rmin)<5) return null;
   const d=f.n*f.Sxx - f.Sx*f.Sx; if(Math.abs(d)<1e-6) return null;
   const a=(f.n*f.Sxy - f.Sx*f.Sy)/d, b=(f.Sy - a*f.Sx)/f.n;
@@ -551,12 +582,17 @@ function resCoef(){
 function predictResistance(targetW, cadence){
   const c=resCoef(); if(!c || !cadence || cadence<40) return null;
   const R=(targetW/cadence - c.b)/c.a;
-  return Math.round(Math.max(resFit.Rmin-5, Math.min(resFit.Rmax+10, R)));
+  const lo = resFit.Rmax>resFit.Rmin ? resFit.Rmin-5 : 0;
+  const hi = resFit.Rmax>resFit.Rmin ? resFit.Rmax+10 : 100;
+  return Math.round(Math.max(lo, Math.min(hi, R)));
 }
 function updateResBadge(){
-  const b=$('resModel'); if(!b) return; const c=resCoef();
-  if(c){ b.textContent=`Calibrated · n=${resFit.n}`; b.className='ready-badge green'; }
-  else { b.textContent=`Learning… n=${resFit.n}/20`; b.className='ready-badge base'; }
+  const b=$('resModel'), cs=$('resCoef'); if(!b) return; const c=resCoef();
+  const line = c ? `model: P/cadence = ${c.a.toFixed(4)}·R ${c.b>=0?'+':'−'} ${Math.abs(c.b).toFixed(3)}` : '';
+  if(HARDCODE_FIT){ b.textContent='Hardcoded'; b.className='ready-badge green'; if(cs) cs.textContent=line+' (baked in)'; }
+  else if(c){ b.textContent=(resLocked?'Locked':'Calibrated')+` · n=${resFit.n}`; b.className='ready-badge green'; if(cs) cs.textContent=line; }
+  else { b.textContent=`Learning… n=${resFit.n}/20`; b.className='ready-badge base';
+         if(cs) cs.textContent=`Need resistance variety to calibrate: ride across a few knob levels (a work interval + a recovery) and it locks in. ${(resFit.Rmax>resFit.Rmin)?`So far seen ${Math.round(resFit.Rmin)}–${Math.round(resFit.Rmax)}.`:''} Until then: up/down hints.`; }
 }
 
 /* ---------------- generative music engine (Tone.js) ----------------
@@ -570,34 +606,59 @@ const MUSIC = (()=>{
 
   const SCALES={ minor:[0,2,3,5,7,8,10], dorian:[0,2,3,5,7,9,10], major:[0,2,4,5,7,9,11] };
   const STYLES={
-    house:     { scale:'minor',  progs:[[0,5,3,4],[0,3,4,4],[5,3,0,4]], lead:false,
+    house:     { scale:'minor',  progs:[[0,5,3,4],[0,3,4,4],[5,3,0,4]], lead:true,  arp:true,
                  kick:'x...x...x...x...', clap:'....x.......x...', hat:'..x...x...x...x.', open:'....x.......x...', bass:'x.x.x.x.x.x.x.x.', chords:true },
-    techno:    { scale:'minor',  progs:[[0,0,5,5],[0,6,0,6]], lead:false,
+    techno:    { scale:'minor',  progs:[[0,0,5,5],[0,6,0,6]], lead:false, arp:true,
                  kick:'x...x...x...x...', clap:'........x.......', hat:'x.x.x.x.x.x.x.x.', open:'..x...x...x...x.', bass:'x...x...x...x...', chords:false },
-    synthwave: { scale:'dorian', progs:[[0,5,3,4],[0,4,5,3],[3,4,0,0]], lead:true,
+    synthwave: { scale:'dorian', progs:[[0,5,3,4],[0,4,5,3],[3,4,0,0]], lead:true,  arp:true,
                  kick:'x.......x.......', clap:'....x.......x...', hat:'x.x.x.x.x.x.x.x.', open:'', bass:'x..x..x.x..x..x.', chords:true },
-    dnb:       { scale:'minor',  progs:[[0,5,3,6],[0,6,5,3]], lead:true,
+    dnb:       { scale:'minor',  progs:[[0,5,3,6],[0,6,5,3]], lead:true,  arp:true,
                  kick:'x.....x...x.....', clap:'....x.......x...', hat:'xxxxxxxxxxxxxxxx', open:'', bass:'x.......x.......', chords:true },
-    lofi:      { scale:'dorian', progs:[[0,3,5,4],[0,4,3,5]], lead:false,
+    lofi:      { scale:'dorian', progs:[[0,3,5,4],[0,4,3,5]], lead:true,  arp:false,
                  kick:'x.......x.......', clap:'....x.......x...', hat:'..x...x...x...x.', open:'', bass:'x.....x...x.....', chords:true },
   };
+  const ARP=[0,2,4,2,7,4,2,4];                 // chord-tone arpeggio over a bar (8th notes)
+  const ROOTS=[45,47,48,50,52,53,55];          // random key each session
   const rint=n=>Math.floor(Math.random()*n), pick=a=>a[rint(a.length)];
   function deg(d, oct=0){ const L=scale.length; while(d<0){ d+=L; oct--; } oct+=Math.floor(d/L); d=((d%L)+L)%L; return Tone.Frequency(rootMidi+scale[d]+12*oct,'midi').toNote(); }
   const triad=r=>[deg(r,1),deg(r+2,1),deg(r+4,1)];
-  function newLead(){ leadPat=[]; for(let i=0;i<16;i++) leadPat.push(Math.random()<0.4?rint(7):null); }
+  const triad7=r=>[deg(r,0),deg(r+2,0),deg(r+4,0),deg(r+6,1)];   // 7th voicing for the pad bed
+  function genMotif(){                                  // 8-step melodic cell
+    const m=new Array(8).fill(null), tones=[0,2,4,7];   // chord tones (+octave)
+    let cur=pick(tones);
+    for(let i=0;i<8;i++){
+      if(i%4===0){ cur=pick(tones); m[i]=cur; }          // land on a chord tone each strong beat
+      else if(Math.random()<0.6){ cur+=pick([-2,-1,1,1,2]); m[i]=cur; }  // else stepwise motion
+      // remaining steps stay null → phrasing/rests
+    }
+    return m;
+  }
+  function newLead(){                                    // motif + varied repeat (call & response)
+    const a=genMotif(), b=a.slice(); b[7]=pick([0,2,4]); // resolve the answer to a chord tone
+    leadPat=a.concat(b);
+  }
   function applyStyle(){ const S=STYLES[style]; scale=SCALES[S.scale]; prog=pick(S.progs); chordIdx=0; newLead(); }
 
   function build(){
-    masterGain=new Tone.Gain(vol).toDestination();
-    filt=new Tone.Filter(1200,'lowpass').connect(masterGain); filt.Q.value=1;
-    inst.kick=new Tone.MembraneSynth({octaves:6, pitchDecay:0.04}).connect(filt);
+    Tone.getContext().lookAhead = 0.2;                  // more scheduling headroom → fewer glitches
+    const limiter=new Tone.Limiter(-1).toDestination(); // catch peaks → no clipping/crackle
+    const comp=new Tone.Compressor({threshold:-18, ratio:3, attack:0.005, release:0.12}).connect(limiter);
+    masterGain=new Tone.Gain(vol).connect(comp);
+    filt=new Tone.Filter(1200,'lowpass').connect(masterGain); filt.Q.value=0.7;
+    const reverb=new Tone.Freeverb({roomSize:0.8, dampening:3500}).connect(filt); reverb.wet.value=0.26;
+    const chorus=new Tone.Chorus({frequency:0.5, delayTime:4, depth:0.7, wet:0.5}).connect(reverb); chorus.start();
+    const delay=new Tone.FeedbackDelay({delayTime:'8n.', feedback:0.22, wet:0.18}).connect(reverb); // melody space
+    inst.kick=new Tone.MembraneSynth({octaves:5, pitchDecay:0.045, envelope:{attack:0.001,decay:0.4,sustain:0,release:0.03}}).connect(filt); inst.kick.volume.value=-3;
     const clapBP=new Tone.Filter(1600,'bandpass').connect(filt);
-    inst.clap=new Tone.NoiseSynth({envelope:{attack:0.001,decay:0.16,sustain:0}}); inst.clap.connect(clapBP); inst.clap.volume.value=-7;
-    const hatHP=new Tone.Filter(7500,'highpass').connect(filt);
-    inst.hat=new Tone.NoiseSynth({envelope:{attack:0.001,decay:0.03,sustain:0}}); inst.hat.connect(hatHP); inst.hat.volume.value=-12;
-    inst.bass=new Tone.MonoSynth({oscillator:{type:'sawtooth'}, envelope:{attack:0.005,decay:0.2,sustain:0.4,release:0.2}, filterEnvelope:{attack:0.01,decay:0.2,baseFrequency:120,octaves:2.5}}).connect(filt);
-    inst.chord=new Tone.PolySynth(Tone.Synth,{oscillator:{type:'fatsawtooth'}, envelope:{attack:0.02,decay:0.3,sustain:0.5,release:0.6}}).connect(filt); inst.chord.volume.value=-14;
-    inst.lead=new Tone.Synth({oscillator:{type:'square'}, envelope:{attack:0.01,decay:0.1,sustain:0.2,release:0.1}}).connect(filt); inst.lead.volume.value=-12;
+    inst.clap=new Tone.NoiseSynth({envelope:{attack:0.001,decay:0.16,sustain:0,release:0.02}}); inst.clap.connect(clapBP); inst.clap.volume.value=-10;
+    const hatHP=new Tone.Filter(8000,'highpass').connect(filt);
+    inst.hat=new Tone.NoiseSynth({envelope:{attack:0.001,decay:0.03,sustain:0,release:0.01}}); inst.hat.connect(hatHP); inst.hat.volume.value=-16;
+    inst.sub=new Tone.MonoSynth({oscillator:{type:'sine'}, envelope:{attack:0.01,decay:0.3,sustain:0.8,release:0.2}}).connect(filt); inst.sub.volume.value=-9;  // sub-bass layer
+    inst.bass=new Tone.MonoSynth({oscillator:{type:'sawtooth'}, envelope:{attack:0.008,decay:0.2,sustain:0.5,release:0.12}, filter:{Q:2,type:'lowpass'}, filterEnvelope:{attack:0.01,decay:0.18,baseFrequency:150,octaves:2.2}}).connect(filt); inst.bass.volume.value=-7;
+    inst.pad=new Tone.PolySynth(Tone.Synth,{maxPolyphony:8, oscillator:{type:'fatsawtooth',count:3,spread:30}, envelope:{attack:0.8,decay:0.5,sustain:0.85,release:1.6}}).connect(chorus); inst.pad.volume.value=-19;  // sustained harmonic bed
+    inst.chord=new Tone.PolySynth(Tone.Synth,{maxPolyphony:6, oscillator:{type:'sawtooth'}, envelope:{attack:0.03,decay:0.4,sustain:0.4,release:0.45}}).connect(filt); inst.chord.volume.value=-17;
+    inst.lead=new Tone.Synth({oscillator:{type:'triangle'}, envelope:{attack:0.01,decay:0.12,sustain:0.28,release:0.18}}).connect(delay); inst.lead.volume.value=-10;
+    inst.arp=new Tone.Synth({oscillator:{type:'square'}, envelope:{attack:0.005,decay:0.08,sustain:0.1,release:0.08}}).connect(delay); inst.arp.volume.value=-16;
     ready=true;
   }
   function step(time, s){
@@ -608,23 +669,25 @@ const MUSIC = (()=>{
     if(I>0.25 && on(S.clap,s)) inst.clap.triggerAttackRelease('16n',time,0.7);
     if(I>0.32 && on(S.hat,s))  inst.hat.triggerAttackRelease('32n',time, I>0.7?0.6:0.35);
     if(I>0.5  && on(S.open,s)) inst.hat.triggerAttackRelease('16n',time,0.4);
-    if(I>0.4  && on(S.bass,s)) inst.bass.triggerAttackRelease(deg(r,-1),'8n',time,0.85);
-    if(I>0.3  && S.chords && (s===0||s===8)) inst.chord.triggerAttackRelease(triad(r),'2n',time,0.5);
-    if(I>0.7  && S.lead && leadPat[s]!=null) inst.lead.triggerAttackRelease(deg(r+leadPat[s],1),'16n',time,0.5);
+    if(I>0.14 && s===0) inst.pad.triggerAttackRelease(triad7(r),'1m',time,0.45);          // always-on harmonic bed
+    if(I>0.30 && (s===0||s===8)) inst.sub.triggerAttackRelease(deg(r,-2),'2n',time,0.9);   // sub-bass foundation
+    if(I>0.4  && on(S.bass,s)){ const bn=(s%8===4)?deg(r+4,-1):(s===12?deg(r,0):deg(r,-1)); inst.bass.triggerAttackRelease(bn,'8n',time,0.85); }
+    if(I>0.42 && S.chords && (s===0||s===8)) inst.chord.triggerAttackRelease(triad(r),'2n',time,0.5);
+    if(I>0.38 && S.arp && s%2===0) inst.arp.triggerAttackRelease(deg(r+ARP[(s/2)%ARP.length],1),'16n',time,0.4);
+    if(I>0.52 && S.lead && leadPat[s]!=null) inst.lead.triggerAttackRelease(deg(r+leadPat[s],1),'8n',time,0.55);
   }
   const zoneI=z=>({Z1:0.18,Z2:0.40,Z3:0.60,Z4:0.82,Z5:0.95,Z6:1.0}[z] ?? 0.5);
   const clampBpm=b=>Math.max(60,Math.min(175,b));
 
   return {
     ok(){ return typeof Tone!=='undefined'; },
-    async start(){ if(!this.ok()) return false; await Tone.start(); if(!ready) build(); applyStyle();
+    async start(){ if(!this.ok()) return false; await Tone.start(); if(!ready) build(); rootMidi=pick(ROOTS); applyStyle();
       Tone.Transport.bpm.value=clampBpm(targetCad);
       if(!seq){ seq=new Tone.Sequence((t,s)=>step(t,s), [...Array(16).keys()], '16n'); seq.start(0); }
       if(Tone.Transport.state!=='started') Tone.Transport.start(); started=true; return true; },
     setBlock(blk){ targetCad=blk.cadence||90; intensity=zoneI(blk.zone);
       if(ready){ Tone.Transport.bpm.rampTo(clampBpm(targetCad),2); filt.frequency.rampTo(400+intensity*5200,1.5); } },
     setStyle(s){ style=s; if(ready&&started) applyStyle(); },
-    setKey(m){ rootMidi=m; },
     setVol(v){ vol=v; if(masterGain) masterGain.gain.rampTo(v,0.2); },
     pause(){ if(started) Tone.Transport.pause(); },
     resume(){ if(started) Tone.Transport.start(); },
@@ -648,7 +711,7 @@ $('readyOverride').onchange=e=>applyOverride(e.target.value);
 $('musicToggle').onclick=async ()=>{
   musicOn=!musicOn; $('musicToggle').textContent=musicOn?'🎵 On':'🎵 Off';
   if(musicOn){
-    MUSIC.setStyle($('musicStyle').value); MUSIC.setKey(+$('musicKey').value); MUSIC.setVol((+$('musicVol').value)/100);
+    MUSIC.setStyle($('musicStyle').value); MUSIC.setVol((+$('musicVol').value)/100);
     const cb=running?currentBlock(elapsed()):null; MUSIC.setBlock(cb?cb.blk:{cadence:90,zone:'Z2'});
     const ok=await MUSIC.start();
     $('musicMsg').textContent = ok ? `Generating ${$('musicStyle').value} @ ${cb?Math.round(cb.blk.cadence):90} bpm` : 'Tone.js failed to load (need internet).';
@@ -656,9 +719,10 @@ $('musicToggle').onclick=async ()=>{
   } else { MUSIC.stop(); $('musicMsg').textContent=''; }
 };
 $('musicStyle').onchange=e=>{ MUSIC.setStyle(e.target.value); if(musicOn) $('musicMsg').textContent='Style: '+e.target.value; };
-$('musicKey').onchange=e=>MUSIC.setKey(+e.target.value);
 $('musicVol').oninput=e=>MUSIC.setVol((+e.target.value)/100);
-$('resReset').onclick=()=>{ resFit={...RES_BLANK}; saveResFit(); updateResBadge(); };
+$('resReset').onclick=()=>{ resFit={...RES_BLANK}; resLocked=false; localStorage.setItem('ic4reslock','0'); $('resLock').textContent='Lock model'; saveResFit(); updateResBadge(); };
+$('resLock').onclick=()=>{ resLocked=!resLocked; localStorage.setItem('ic4reslock', resLocked?'1':'0'); $('resLock').textContent=resLocked?'Unlock model':'Lock model'; updateResBadge(); };
+$('resLock').textContent = resLocked?'Unlock model':'Lock model';
 if (localStorage.getItem('ic4ftp')) $('ftp').value=localStorage.getItem('ic4ftp');
 if (localStorage.getItem('ic4dur')) $('dur').value=localStorage.getItem('ic4dur');
 if (!navigator.bluetooth) { $('status').textContent='No Web Bluetooth — use desktop Chrome/Edge.'; $('connect').disabled=true; }
