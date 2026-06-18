@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>IC4 BLE Probe</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; background:#111; color:#eee; }
+  header { padding: 16px 20px; background:#1b1b1b; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  button { font: inherit; padding: 8px 16px; border-radius:8px; border:0; background:#3b82f6; color:#fff; cursor:pointer; }
+  button:disabled { background:#444; cursor:default; }
+  #status { color:#9ca3af; }
+  main { display:grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap:14px; padding:20px; }
+  .card { background:#1b1b1b; border-radius:12px; padding:16px; text-align:center; }
+  .card .v { font-size:2.4rem; font-weight:700; }
+  .card .l { color:#9ca3af; font-size:.85rem; text-transform:uppercase; letter-spacing:.05em; }
+  section { padding: 0 20px 24px; }
+  h2 { font-size:1rem; color:#9ca3af; }
+  #fields code { background:#000; padding:2px 6px; border-radius:4px; }
+  #fields .yes { color:#4ade80; } #fields .no { color:#6b7280; }
+  pre#log { background:#000; padding:12px; border-radius:8px; max-height:240px; overflow:auto; font-size:12px; }
+  .hint { color:#9ca3af; font-size:.9rem; }
+</style>
+</head>
+<body>
+<header>
+  <button id="connect">Connect to bike</button>
+  <button id="connect-hr">Connect H10 strap</button>
+  <button id="zero" disabled>Mark knob test ↻</button>
+  <span id="status">Not connected.</span>
+</header>
+
+<main>
+  <div class="card"><div class="v" id="power">—</div><div class="l">Power (W)</div></div>
+  <div class="card"><div class="v" id="cadence">—</div><div class="l">Cadence (rpm)</div></div>
+  <div class="card"><div class="v" id="speed">—</div><div class="l">Speed (km/h)</div></div>
+  <div class="card"><div class="v" id="resistance">—</div><div class="l">Resistance</div></div>
+  <div class="card"><div class="v" id="hr">—</div><div class="l">Heart rate</div></div>
+</main>
+
+<section>
+  <h2>Fields this bike actually transmits</h2>
+  <div id="fields" class="hint">Connect to populate. The key question: is <code>Resistance Level</code> present?</div>
+</section>
+
+<section>
+  <h2>Knob experiment</h2>
+  <p class="hint">Hold a steady cadence (~80 rpm). Click <b>Mark knob test</b>, then slowly twist the
+  resistance knob up without changing your legs. Watch the Power number. If it moves, the bike
+  senses resistance. If it stays flat, power is cadence-only — and our coach must be cadence + HR based.</p>
+</section>
+
+<section>
+  <h2>Raw log</h2>
+  <pre id="log"></pre>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+const log = (...a) => { $('log').textContent = a.join(' ') + '\n' + $('log').textContent; };
+
+// FTMS Indoor Bike Data (0x2AD2) field table, in spec order.
+// present(flags) decides if the field is in this packet; size in bytes; scale applied to raw int.
+const FIELDS = [
+  { key:'speed',        label:'Instantaneous Speed', present:f=>!(f & 1<<0), size:2, signed:false, scale:0.01 },
+  { key:'avgSpeed',     label:'Average Speed',       present:f=> (f & 1<<1), size:2, signed:false, scale:0.01 },
+  { key:'cadence',      label:'Instantaneous Cadence',present:f=>(f & 1<<2), size:2, signed:false, scale:0.5 },
+  { key:'avgCadence',   label:'Average Cadence',     present:f=> (f & 1<<3), size:2, signed:false, scale:0.5 },
+  { key:'distance',     label:'Total Distance',      present:f=> (f & 1<<4), size:3, signed:false, scale:1 },
+  { key:'resistance',   label:'Resistance Level',    present:f=> (f & 1<<5), size:2, signed:true,  scale:1 },
+  { key:'power',        label:'Instantaneous Power', present:f=> (f & 1<<6), size:2, signed:true,  scale:1 },
+  { key:'avgPower',     label:'Average Power',       present:f=> (f & 1<<7), size:2, signed:true,  scale:1 },
+  { key:'energyTotal',  label:'Total Energy',        present:f=> (f & 1<<8), size:2, signed:false, scale:1 },
+  { key:'energyHour',   label:'Energy/Hour',         present:f=> (f & 1<<8), size:2, signed:false, scale:1 },
+  { key:'energyMin',    label:'Energy/Min',          present:f=> (f & 1<<8), size:1, signed:false, scale:1 },
+  { key:'hr',           label:'Heart Rate',          present:f=> (f & 1<<9), size:1, signed:false, scale:1 },
+  { key:'met',          label:'Metabolic Equivalent',present:f=> (f & 1<<10),size:1, signed:false, scale:0.1 },
+  { key:'elapsed',      label:'Elapsed Time',        present:f=> (f & 1<<11),size:2, signed:false, scale:1 },
+  { key:'remaining',    label:'Remaining Time',      present:f=> (f & 1<<12),size:2, signed:false, scale:1 },
+];
+
+function readInt(dv, off, size, signed) {
+  if (size === 1) return signed ? dv.getInt8(off) : dv.getUint8(off);
+  if (size === 2) return signed ? dv.getInt16(off, true) : dv.getUint16(off, true);
+  if (size === 3) { // uint24 LE
+    return dv.getUint8(off) | (dv.getUint8(off+1)<<8) | (dv.getUint8(off+2)<<16);
+  }
+}
+
+let fieldsReported = false;
+function parseIndoorBikeData(dv) {
+  const flags = dv.getUint16(0, true);
+  let off = 2;
+  const out = {};
+  for (const fld of FIELDS) {
+    if (!fld.present(flags)) continue;
+    out[fld.key] = readInt(dv, off, fld.size, fld.signed) * fld.scale;
+    off += fld.size;
+  }
+  if (!fieldsReported) {
+    fieldsReported = true;
+    const rows = FIELDS
+      .filter((f,i,a)=>a.findIndex(x=>x.key===f.key)===i)
+      .map(f => `<div class="${f.present(flags)?'yes':'no'}">${f.present(flags)?'✓':'·'} ${f.label}</div>`);
+    $('fields').innerHTML = `<p>flags = <code>0b${flags.toString(2).padStart(13,'0')}</code></p>` + rows.join('');
+    log('flags', '0b'+flags.toString(2), '→ present:', Object.keys(out).join(', '));
+  }
+  return out;
+}
+
+function show(id, v, digits=0) { $(id).textContent = v==null ? '—' : v.toFixed(digits); }
+
+async function connect() {
+  try {
+    $('status').textContent = 'Requesting device…';
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: ['fitness_machine'] }],
+      optionalServices: ['heart_rate', 'cycling_speed_and_cadence'],
+    });
+    device.addEventListener('gattserverdisconnected', () => $('status').textContent = 'Disconnected.');
+    const server = await device.gatt.connect();
+    $('status').textContent = 'Connected: ' + (device.name || 'IC4') + ' — pedal to stream.';
+    $('zero').disabled = false;
+
+    const ftms = await server.getPrimaryService('fitness_machine');
+    const ch = await ftms.getCharacteristic('indoor_bike_data');
+    await ch.startNotifications();
+    ch.addEventListener('characteristicvaluechanged', e => {
+      const d = parseIndoorBikeData(e.target.value);
+      show('power', d.power);
+      show('cadence', d.cadence);
+      show('speed', d.speed, 1);
+      show('resistance', d.resistance);
+      if (d.hr != null) show('hr', d.hr);
+    });
+
+    // Optional: dedicated HR strap if you pair one later.
+    try {
+      const hrs = await server.getPrimaryService('heart_rate');
+      const hrc = await hrs.getCharacteristic('heart_rate_measurement');
+      await hrc.startNotifications();
+      hrc.addEventListener('characteristicvaluechanged', e => {
+        const dv = e.target.value, flags = dv.getUint8(0);
+        show('hr', (flags & 1) ? dv.getUint16(1, true) : dv.getUint8(1));
+      });
+    } catch { /* no HR service on this device — fine */ }
+
+  } catch (err) {
+    $('status').textContent = 'Error: ' + err.message;
+    log('ERROR', err.message);
+  }
+}
+
+// --- Polar H10 (or any standard BLE strap): separate device, its own connection ---
+function parseHeartRate(dv) {
+  const flags = dv.getUint8(0);
+  let off = 1;
+  const hr = (flags & 1) ? dv.getUint16(off, true) : dv.getUint8(off);
+  off += (flags & 1) ? 2 : 1;
+  if (flags & (1<<3)) off += 2;            // Energy Expended present → skip 2 bytes
+  const rr = [];
+  if (flags & (1<<4)) {                     // RR intervals present (1/1024 s units)
+    for (; off + 1 < dv.byteLength; off += 2) rr.push(dv.getUint16(off, true) / 1024);
+  }
+  return { hr, rr };
+}
+
+async function connectHR() {
+  try {
+    $('status').textContent = 'Requesting HR strap…';
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: ['heart_rate'] }],
+    });
+    const server = await device.gatt.connect();
+    $('status').textContent = 'HR connected: ' + (device.name || 'strap');
+    const svc = await server.getPrimaryService('heart_rate');
+    const ch = await svc.getCharacteristic('heart_rate_measurement');
+    await ch.startNotifications();
+    let logged = false;
+    ch.addEventListener('characteristicvaluechanged', e => {
+      const { hr, rr } = parseHeartRate(e.target.value);
+      show('hr', hr);
+      if (rr.length && !logged) { logged = true; log('H10 RR intervals streaming (HRV-capable):', rr.map(x=>x.toFixed(3)).join(', '), 's'); }
+    });
+  } catch (err) {
+    $('status').textContent = 'HR error: ' + err.message;
+    log('HR ERROR', err.message);
+  }
+}
+
+$('connect').addEventListener('click', connect);
+$('connect-hr').addEventListener('click', connectHR);
+$('zero').addEventListener('click', () => log('--- KNOB TEST MARK: watch Power while you twist the resistance ---'));
+
+if (!navigator.bluetooth) {
+  $('status').textContent = 'Web Bluetooth not available. Use desktop Chrome or Edge (not Safari).';
+  $('connect').disabled = true;
+}
+</script>
+</body>
+</html>

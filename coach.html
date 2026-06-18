@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>IC4 Coach</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 0; background:#0d0d0f; color:#eee; }
+  header { padding: 12px 18px; background:#17171b; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  button { font: inherit; padding: 8px 14px; border-radius:8px; border:0; background:#3b82f6; color:#fff; cursor:pointer; }
+  button.ghost { background:#2a2a31; }
+  button:disabled { background:#333; color:#777; cursor:default; }
+  input[type=number] { width:72px; font:inherit; padding:6px 8px; border-radius:6px; border:1px solid #333; background:#000; color:#eee; }
+  label { color:#9ca3af; font-size:.9rem; }
+  #status { color:#9ca3af; margin-left:auto; }
+  .wrap { padding:18px; display:grid; gap:16px; max-width:900px; margin:0 auto; }
+
+  /* ---- the coach panel (this is what pops into Picture-in-Picture) ---- */
+  #coach { background:#17171b; border-radius:16px; padding:18px; }
+  .block-head { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .block-name { font-size:clamp(1.1rem, 5vw, 1.5rem); font-weight:700; }
+  .zone-chip { font-size:.8rem; padding:2px 8px; border-radius:999px; font-weight:700; color:#000; }
+  .clock { margin-left:auto; font-variant-numeric:tabular-nums; font-size:clamp(1.6rem, 8vw, 2.2rem); font-weight:700; }
+  .next { color:#9ca3af; font-size:.9rem; margin-top:2px; }
+
+  .targets { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px; }
+  .metric { background:#0d0d0f; border-radius:12px; padding:14px; text-align:center; position:relative; }
+  .metric .lab { color:#9ca3af; font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; }
+  .metric .cur { font-size:clamp(2rem, 11vw, 2.8rem); font-weight:800; line-height:1.05; font-variant-numeric:tabular-nums; }
+  .metric .tgt { color:#9ca3af; font-size:.95rem; }
+  .metric .arrow { font-size:1.6rem; font-weight:800; }
+  .on { color:#4ade80; } .under { color:#fbbf24; } .over { color:#f87171; }
+
+  .secondary { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:12px; }
+  .secondary .metric .cur { font-size:clamp(1.3rem, 6vw, 1.8rem); }
+
+  .guide { margin-top:14px; text-align:center; font-size:1.25rem; font-weight:700; padding:10px; border-radius:10px; background:#0d0d0f; }
+
+  .progress { margin-top:14px; height:10px; background:#0d0d0f; border-radius:999px; overflow:hidden; }
+  .progress > div { height:100%; background:#3b82f6; width:0%; transition:width .3s; }
+
+  /* timeline preview */
+  #timeline { display:flex; height:46px; border-radius:8px; overflow:hidden; background:#0d0d0f; }
+  #timeline .seg { position:relative; }
+  #timeline .seg .mark { position:absolute; inset:0; opacity:.85; }
+  #plan-meta { color:#9ca3af; font-size:.9rem; }
+  .pip-note { color:#6b7280; font-size:.85rem; }
+  .card-ready { background:#17171b; border-radius:12px; padding:14px; }
+  .ready-badge { font-weight:700; padding:3px 10px; border-radius:999px; background:#2a2a31; }
+  .ready-badge.green{ background:#14361f; color:#4ade80; }
+  .ready-badge.amber{ background:#3a3413; color:#fbbf24; }
+  .ready-badge.red{ background:#3a1717; color:#f87171; }
+  .ready-badge.base{ background:#1e293b; color:#93c5fd; }
+  select.ghost { background:#2a2a31; color:#eee; border:0; border-radius:8px; padding:8px 10px; font:inherit; cursor:pointer; }
+
+  /* portrait split-screen (coach narrow, e.g. YouTube on the right) + PiP window */
+  @media (max-width: 560px) {
+    .wrap { padding:10px; gap:10px; }
+    header { padding:10px; gap:8px; }
+    #coach { padding:14px; }
+    .targets { gap:8px; }
+    .secondary { gap:6px; }
+    .metric { padding:10px; }
+    #status { margin-left:0; flex-basis:100%; }
+  }
+  @media (max-width: 380px) {
+    .secondary { grid-template-columns:repeat(3, 1fr); }
+    .secondary .metric .lab { font-size:.68rem; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <button id="connect">Connect bike</button>
+  <button id="connect-hr" class="ghost">Connect H10</button>
+  <label>FTP <input id="ftp" type="number" value="200" min="50" max="500" /> W</label>
+  <label>Duration <input id="dur" type="number" value="30" min="10" max="120" /> min</label>
+  <button id="gen" class="ghost">Build plan</button>
+  <span id="status">Not connected.</span>
+</header>
+
+<div class="wrap">
+  <div id="readiness" class="card-ready">
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+      <strong>Readiness</strong>
+      <span id="readyBadge" class="ready-badge">Not checked</span>
+      <button id="readyStart" class="ghost">Check readiness (H10)</button>
+      <select id="readyOverride" class="ghost" title="Override the HRV call if you disagree">
+        <option value="auto">Auto (HRV)</option>
+        <option value="full">Override · full intensity</option>
+        <option value="trim">Override · trim ~7%</option>
+        <option value="easy">Override · easy ride</option>
+      </select>
+      <span id="readyMsg" style="color:#9ca3af; font-size:.9rem;"></span>
+    </div>
+    <div id="readyDetail" style="margin-top:8px; color:#9ca3af; font-size:.9rem;"></div>
+  </div>
+
+  <div>
+    <div id="plan-meta">Set your FTP and duration, then Build plan.</div>
+    <div id="timeline"></div>
+  </div>
+
+  <div id="coach">
+    <div class="block-head">
+      <span class="block-name" id="blockName">— Press Start —</span>
+      <span class="zone-chip" id="zoneChip" style="background:#3b82f6">READY</span>
+      <span class="clock" id="clock">0:00</span>
+    </div>
+    <div class="next" id="nextUp"></div>
+
+    <div class="targets">
+      <div class="metric">
+        <div class="lab">Power</div>
+        <div class="cur" id="pCur">—</div>
+        <div class="tgt"><span class="arrow" id="pArrow"></span> target <span id="pTgt">—</span> W</div>
+      </div>
+      <div class="metric">
+        <div class="lab">Cadence</div>
+        <div class="cur" id="cCur">—</div>
+        <div class="tgt"><span class="arrow" id="cArrow"></span> target <span id="cTgt">—</span> rpm</div>
+      </div>
+    </div>
+
+    <div class="guide" id="guide">Connect the bike to begin.</div>
+
+    <div class="secondary">
+      <div class="metric"><div class="lab">Heart rate</div><div class="cur" id="hrCur">—</div></div>
+      <div class="metric"><div class="lab">Resistance</div><div class="cur" id="rCur">—</div></div>
+      <div class="metric"><div class="lab">Speed</div><div class="cur" id="sCur">—</div></div>
+    </div>
+
+    <div class="progress"><div id="progBar"></div></div>
+  </div>
+
+  <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+    <button id="start" disabled>Start</button>
+    <button id="pause" class="ghost" disabled>Pause</button>
+    <button id="skip" class="ghost" disabled>Skip block</button>
+    <button id="reset" class="ghost" disabled>Reset</button>
+    <button id="pip" class="ghost">Pop out (PiP)</button>
+    <button id="sound" class="ghost">🔔 On</button>
+    <span class="pip-note">Pop out floats the coach over YouTube. Chrome/Edge only.</span>
+  </div>
+
+  <div id="music" class="card-ready">
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+      <strong>Generative music → cadence</strong>
+      <button id="musicToggle" class="ghost">🎵 Off</button>
+      <label>Style
+        <select id="musicStyle" class="ghost">
+          <option value="house">House</option>
+          <option value="techno">Techno</option>
+          <option value="synthwave">Synthwave</option>
+          <option value="dnb">Drum &amp; Bass</option>
+          <option value="lofi">Lo-fi (chill)</option>
+        </select>
+      </label>
+      <label>Key
+        <select id="musicKey" class="ghost">
+          <option value="45">A</option><option value="48">C</option><option value="50">D</option>
+          <option value="52">E</option><option value="53">F</option><option value="55">G</option>
+        </select>
+      </label>
+      <label>Vol <input id="musicVol" type="range" min="0" max="100" value="65" style="vertical-align:middle"></label>
+      <span id="musicMsg" style="color:#9ca3af; font-size:.9rem;"></span>
+    </div>
+    <div style="margin-top:6px; color:#6b7280; font-size:.82rem;">Tempo locks to your target cadence; the arrangement thickens on work intervals and breaks down on recovery, re-randomizing each 4-bar phrase. Synthesized live with Tone.js — needs internet to load the library once.</div>
+  </div>
+
+  <div id="rescoach" class="card-ready">
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+      <strong>Resistance prediction</strong>
+      <span id="resModel" class="ready-badge">Learning…</span>
+      <button id="resReset" class="ghost">Reset calibration</button>
+      <span style="color:#6b7280; font-size:.82rem;">Learns your IC4's power = f(cadence, resistance) as you ride, then suggests the exact knob level for each target.</span>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+/* ---------------- live state from BLE ---------------- */
+const state = { power:null, cadence:null, speed:null, resistance:null, hr:null };
+
+/* ---------------- FTMS Indoor Bike Data parse (flag-aware) ---------------- */
+const FIELDS = [
+  { key:'speed',      present:f=>!(f&1<<0), size:2, signed:false, scale:0.01 },
+  { key:'avgSpeed',   present:f=>(f&1<<1),  size:2, signed:false, scale:0.01 },
+  { key:'cadence',    present:f=>(f&1<<2),  size:2, signed:false, scale:0.5 },
+  { key:'avgCadence', present:f=>(f&1<<3),  size:2, signed:false, scale:0.5 },
+  { key:'distance',   present:f=>(f&1<<4),  size:3, signed:false, scale:1 },
+  { key:'resistance', present:f=>(f&1<<5),  size:2, signed:true,  scale:1 },
+  { key:'power',      present:f=>(f&1<<6),  size:2, signed:true,  scale:1 },
+  { key:'avgPower',   present:f=>(f&1<<7),  size:2, signed:true,  scale:1 },
+  { key:'energyTot',  present:f=>(f&1<<8),  size:2, signed:false, scale:1 },
+  { key:'energyHr',   present:f=>(f&1<<8),  size:2, signed:false, scale:1 },
+  { key:'energyMin',  present:f=>(f&1<<8),  size:1, signed:false, scale:1 },
+  { key:'hr',         present:f=>(f&1<<9),  size:1, signed:false, scale:1 },
+  { key:'met',        present:f=>(f&1<<10), size:1, signed:false, scale:0.1 },
+  { key:'elapsed',    present:f=>(f&1<<11), size:2, signed:false, scale:1 },
+  { key:'remaining',  present:f=>(f&1<<12), size:2, signed:false, scale:1 },
+];
+function readInt(dv, off, size, signed) {
+  if (size===1) return signed ? dv.getInt8(off) : dv.getUint8(off);
+  if (size===2) return signed ? dv.getInt16(off,true) : dv.getUint16(off,true);
+  return dv.getUint8(off) | (dv.getUint8(off+1)<<8) | (dv.getUint8(off+2)<<16);
+}
+function parseBike(dv) {
+  const flags = dv.getUint16(0,true); let off=2;
+  for (const f of FIELDS) { if (!f.present(flags)) continue; const v=readInt(dv,off,f.size,f.signed)*f.scale; off+=f.size;
+    if (f.key in state) state[f.key]=v; }
+}
+function parseHR(dv) {
+  const flags=dv.getUint8(0); let off=1;
+  state.hr = (flags&1) ? dv.getUint16(off,true) : dv.getUint8(off);
+}
+
+async function connectBike() {
+  try {
+    $('status').textContent='Requesting bike…';
+    const dev = await navigator.bluetooth.requestDevice({ filters:[{services:['fitness_machine']}], optionalServices:['heart_rate'] });
+    const srv = await (await dev.gatt.connect()).getPrimaryService('fitness_machine');
+    const ch = await srv.getCharacteristic('indoor_bike_data');
+    await ch.startNotifications();
+    ch.addEventListener('characteristicvaluechanged', e=>parseBike(e.target.value));
+    dev.addEventListener('gattserverdisconnected', ()=>$('status').textContent='Bike disconnected.');
+    $('status').textContent='Bike connected — pedal.';
+    $('start').disabled=false;
+  } catch(err){ $('status').textContent='Bike error: '+err.message; }
+}
+async function connectHR() {
+  try {
+    $('status').textContent='Requesting H10…';
+    const dev = await navigator.bluetooth.requestDevice({ filters:[{services:['heart_rate']}] });
+    const srv = await (await dev.gatt.connect()).getPrimaryService('heart_rate');
+    const ch = await srv.getCharacteristic('heart_rate_measurement');
+    await ch.startNotifications();
+    ch.addEventListener('characteristicvaluechanged', e=>parseHR(e.target.value));
+    $('status').textContent='H10 connected.';
+  } catch(err){ $('status').textContent='H10 error: '+err.message; }
+}
+
+/* ---------------- workout model ---------------- */
+const ZONES = {
+  Z1:{name:'Recovery', col:'#60a5fa'}, Z2:{name:'Endurance', col:'#4ade80'},
+  Z3:{name:'Tempo', col:'#a3e635'},    Z4:{name:'Threshold', col:'#fbbf24'},
+  Z5:{name:'VO2max', col:'#fb923c'},   Z6:{name:'Anaerobic', col:'#f87171'},
+};
+let workout = [];   // [{name, sec, watts|ramp:[w0,w1], cadence, zone}]
+let totalSec = 0;
+
+function buildWorkout(ftp, durMin) {
+  if (readiness.mode==='easy') return buildEndurance(ftp, durMin);
+  const total = durMin*60;
+  const warm = Math.min(360, Math.max(240, Math.round(total*0.18)));
+  const cool = Math.min(300, Math.max(180, Math.round(total*0.13)));
+  const main = total - warm - cool;
+  const W = pct => Math.round(ftp*pct*readiness.mult);   // readiness scales intensity
+  const b = [];
+  b.push({ name:'Warm-up', sec:warm, ramp:[W(0.5), W(0.72)], cadence:85, zone:'Z2' });
+  const workSec=90, recSec=90, pair=workSec+recSec;
+  const pairs = Math.max(1, Math.floor(main/pair));
+  for (let i=0;i<pairs;i++){
+    b.push({ name:`Interval ${i+1}/${pairs}`, sec:workSec, watts:W(1.06), cadence:98, zone:'Z5' });
+    b.push({ name:'Recovery', sec:recSec, watts:W(0.5), cadence:85, zone:'Z1' });
+  }
+  const left = main - pairs*pair;
+  if (left > 25) b.push({ name:'Tempo', sec:left, watts:W(0.8), cadence:90, zone:'Z3' });
+  b.push({ name:'Cool-down', sec:cool, ramp:[W(0.55), W(0.4)], cadence:80, zone:'Z1' });
+  return b;
+}
+function buildEndurance(ftp, durMin) {   // red-day fallback: easy aerobic ride
+  const total = durMin*60;
+  const warm = Math.min(300, Math.max(180, Math.round(total*0.15)));
+  const cool = Math.min(240, Math.max(150, Math.round(total*0.12)));
+  const main = total - warm - cool;
+  const W = pct => Math.round(ftp*pct);
+  const lift = Math.min(120, Math.round(main*0.12));
+  const seg = Math.max(60, Math.round((main - 2*lift)/3));
+  const b = [];
+  b.push({ name:'Warm-up', sec:warm, ramp:[W(0.45),W(0.6)], cadence:85, zone:'Z2' });
+  b.push({ name:'Endurance', sec:seg, watts:W(0.62), cadence:88, zone:'Z2' });
+  b.push({ name:'Tempo lift', sec:lift, watts:W(0.78), cadence:90, zone:'Z3' });
+  b.push({ name:'Endurance', sec:seg, watts:W(0.62), cadence:88, zone:'Z2' });
+  b.push({ name:'Tempo lift', sec:lift, watts:W(0.78), cadence:90, zone:'Z3' });
+  b.push({ name:'Endurance', sec:Math.max(60, main-2*seg-2*lift), watts:W(0.6), cadence:86, zone:'Z2' });
+  b.push({ name:'Cool-down', sec:cool, ramp:[W(0.5),W(0.4)], cadence:80, zone:'Z1' });
+  return b;
+}
+function blockTargetWatts(blk, tIn) {
+  if (blk.ramp) { const k = Math.min(1, tIn/blk.sec); return Math.round(blk.ramp[0] + (blk.ramp[1]-blk.ramp[0])*k); }
+  return blk.watts;
+}
+function renderPlan() {
+  const ftp=+$('ftp').value, dur=+$('dur').value;
+  workout = buildWorkout(ftp, dur);
+  totalSec = workout.reduce((s,b)=>s+b.sec,0);
+  localStorage.setItem('ic4ftp', ftp); localStorage.setItem('ic4dur', dur);
+  const tl = $('timeline'); tl.innerHTML='';
+  workout.forEach(b=>{ const seg=document.createElement('div'); seg.className='seg'; seg.style.flex=b.sec;
+    const m=document.createElement('div'); m.className='mark'; m.style.background=ZONES[b.zone].col; seg.appendChild(m); tl.appendChild(seg); });
+  const mm=Math.round(totalSec/60);
+  const mode = readiness.mode==='easy'
+    ? 'Endurance ride (HRV: recover)'
+    : `${ZONES.Z5.name} intervals @ ${Math.round(ftp*1.06*readiness.mult)} W${readiness.mult!==1?` (HRV ×${readiness.mult})`:''}`;
+  $('plan-meta').textContent = `${workout.length} blocks · ${mm} min · FTP ${ftp} W · ${mode}`;
+}
+
+/* ---------------- run clock ---------------- */
+let running=false, paused=false, startMs=0, pausedMs=0, pauseStart=0, skipShift=0;
+function elapsed() { if (!running) return 0; const now=performance.now(); const p = paused ? now-pauseStart : 0; return (now - startMs - pausedMs - p)/1000 + skipShift; }
+function currentBlock(t) {
+  let acc=0; for (let i=0;i<workout.length;i++){ if (t < acc+workout[i].sec) return {blk:workout[i], i, tIn:t-acc, tLeft:acc+workout[i].sec-t}; acc+=workout[i].sec; }
+  return null;
+}
+
+function fmt(s){ s=Math.max(0,Math.round(s)); const m=Math.floor(s/60); return m+':'+String(s%60).padStart(2,'0'); }
+function arrowFor(cur, tgt, tol) {
+  if (cur==null) return {cls:'', ch:'', word:'no data'};
+  const d = cur - tgt;
+  if (Math.abs(d) <= tol) return {cls:'on', ch:'✓', word:'on target'};
+  return d<0 ? {cls:'under', ch:'▲', word:'go harder'} : {cls:'over', ch:'▼', word:'ease off'};
+}
+
+function tick() {
+  // live secondary metrics always
+  $('hrCur').textContent = state.hr!=null ? Math.round(state.hr) : '—';
+  $('rCur').textContent  = state.resistance!=null ? Math.round(state.resistance) : '—';
+  $('sCur').textContent  = state.speed!=null ? state.speed.toFixed(1) : '—';
+  $('pCur').textContent  = state.power!=null ? Math.round(state.power) : '—';
+  $('cCur').textContent  = state.cadence!=null ? Math.round(state.cadence) : '—';
+
+  // learn the resistance↔power model continuously (~1 Hz), even before Start
+  const nowMs=performance.now();
+  if (nowMs-lastResSample > 1000) {
+    lastResSample=nowMs;
+    resAddSample(state.cadence, state.resistance, state.power);
+    if (resFit.n % 5 === 0) saveResFit();
+    updateResBadge();
+  }
+
+  if (!running) { requestAnimationFrame(tick); return; }
+  const t = elapsed();
+  if (t >= totalSec) { finish(); return; }
+  const cb = currentBlock(t);
+  if (!cb) { requestAnimationFrame(tick); return; }
+  const { blk, i, tLeft } = cb;
+  if (i !== lastBlockIdx) { const prev=lastBlockIdx; lastBlockIdx=i; beepBlockChange(blk, prev); if(musicOn) MUSIC.setBlock(blk); }
+  const tgtW = blockTargetWatts(blk, blk.sec - tLeft);
+
+  $('blockName').textContent = blk.name;
+  const z = ZONES[blk.zone];
+  $('zoneChip').textContent = blk.zone+' · '+z.name; $('zoneChip').style.background=z.col;
+  $('clock').textContent = fmt(tLeft);
+  const nxt = workout[i+1];
+  $('nextUp').textContent = nxt ? `Next: ${nxt.name} · ${nxt.zone==='Z1'?'recover':blockTargetWatts(nxt,0)+' W'} (${fmt(nxt.sec)})` : 'Last block — finish strong';
+
+  $('pTgt').textContent = tgtW;
+  $('cTgt').textContent = blk.cadence;
+  const pa = arrowFor(state.power, tgtW, Math.max(8, tgtW*0.05));
+  const ca = arrowFor(state.cadence, blk.cadence, 4);
+  $('pArrow').textContent=pa.ch; $('pArrow').className='arrow '+pa.cls; $('pCur').className='cur '+pa.cls;
+  $('cArrow').textContent=ca.ch; $('cArrow').className='arrow '+ca.cls; $('cCur').className='cur '+ca.cls;
+
+  // knob guidance: prefer a learned resistance target, else qualitative
+  let g, gcol='#0d0d0f';
+  const predR = predictResistance(tgtW, state.cadence || blk.cadence);
+  if (state.power==null) g='Pedal to get a reading…';
+  else if (pa.cls==='on') { g='✓ On target — hold it'; gcol='#14361f'; }
+  else if (predR!=null && state.resistance!=null) {
+    const dir = predR>state.resistance ? 'knob ▲ up' : (predR<state.resistance ? 'knob ▼ down' : 'hold');
+    g = `Set resistance ≈ ${predR} (now ${Math.round(state.resistance)}) — ${dir}`;
+    gcol = pa.cls==='under' ? '#3a3413' : '#3a1717';
+  }
+  else if (pa.cls==='under') { g = ca.cls==='under' ? '▲ Spin up toward '+blk.cadence+' rpm, then add resistance' : '▲ Add resistance (knob up)'; gcol='#3a3413'; }
+  else { g = '▼ Ease resistance (knob down)'; gcol='#3a1717'; }
+  $('guide').textContent=g; $('guide').style.background=gcol;
+
+  $('progBar').style.width = (100*t/totalSec).toFixed(1)+'%';
+  requestAnimationFrame(tick);
+}
+
+function start(){ if (!workout.length) renderPlan(); ensureAudio(); lastBlockIdx=-1; running=true; paused=false; startMs=performance.now(); pausedMs=0; skipShift=0;
+  if(musicOn) MUSIC.start();
+  $('start').disabled=true; $('pause').disabled=false; $('skip').disabled=false; $('reset').disabled=false; }
+function togglePause(){ if (!running) return; if (!paused){ paused=true; pauseStart=performance.now(); $('pause').textContent='Resume'; if(musicOn) MUSIC.pause(); }
+  else { paused=false; pausedMs+=performance.now()-pauseStart; $('pause').textContent='Pause'; if(musicOn) MUSIC.resume(); } }
+function skip(){ if (!running) return; const t=elapsed(); const cb=currentBlock(t); if (cb) skipShift += cb.tLeft + 0.01; }
+function reset(){ running=false; paused=false; lastBlockIdx=-1; MUSIC.stop(); $('pause').textContent='Pause';
+  $('start').disabled=false; $('pause').disabled=true; $('skip').disabled=true; $('reset').disabled=true;
+  $('blockName').textContent='— Press Start —'; $('zoneChip').textContent='READY'; $('zoneChip').style.background='#3b82f6';
+  $('clock').textContent='0:00'; $('nextUp').textContent=''; $('guide').textContent='Ready when you are.'; $('progBar').style.width='0%'; }
+function finish(){ running=false; $('blockName').textContent='✓ Workout complete'; $('zoneChip').textContent='DONE'; $('zoneChip').style.background='#4ade80';
+  $('clock').textContent='0:00'; $('guide').textContent='Nice work. Cool down and stretch.'; $('guide').style.background='#14361f'; $('progBar').style.width='100%';
+  $('pause').disabled=true; $('skip').disabled=true; $('start').disabled=false; playTones([700,900,1175]); MUSIC.stop(); }
+
+/* ---------------- Document Picture-in-Picture ---------------- */
+let pipWin=null;
+async function popOut() {
+  if (!window.documentPictureInPicture) { $('status').textContent='Document PiP not supported — update Chrome/Edge.'; return; }
+  if (pipWin) { pipWin.close(); return; }
+  pipWin = await documentPictureInPicture.requestWindow({ width:380, height:520 });
+  [...document.styleSheets].forEach(ss=>{ try { const s=pipWin.document.createElement('style'); s.textContent=[...ss.cssRules].map(r=>r.cssText).join('\n'); pipWin.document.head.appendChild(s);} catch{} });
+  pipWin.document.body.style.background='#0d0d0f';
+  const coach=$('coach'); const placeholder=document.createComment('coach'); coach.replaceWith(placeholder);
+  pipWin.document.body.append(coach);
+  pipWin.addEventListener('pagehide', ()=>{ placeholder.replaceWith(coach); pipWin=null; });
+  $('pip').textContent='Return from PiP';
+}
+
+/* ---------------- readiness: HRV-guided gate (Plews/Buchheit lnRMSSD) ---------------- */
+let readiness = { mult:1, mode:'normal', verdict:null };
+let autoVerdict = null;                      // last HRV-computed verdict, for "Auto" override
+const HRV_WINDOW = 150, HRV_DISCARD = 30;   // seconds: total measurement, initial settle discarded
+let rrAll=[], hrAll=[], measuring=false, measT0=0, measIv=null;
+
+function parseHRfull(dv){
+  const flags=dv.getUint8(0); let off=1;
+  const hr=(flags&1)?dv.getUint16(off,true):dv.getUint8(off); off+=(flags&1)?2:1;
+  if(flags&(1<<3)) off+=2;                                  // skip Energy Expended
+  const rr=[]; if(flags&(1<<4)){ for(;off+1<dv.byteLength;off+=2) rr.push(dv.getUint16(off,true)/1024*1000); } // → ms
+  return {hr, rr};
+}
+function rmssd(rr){
+  const clean=rr.filter(x=>x>=300&&x<=2000);               // physiologic bounds
+  let sum=0,n=0;
+  for(let i=1;i<clean.length;i++){ const d=clean[i]-clean[i-1]; if(Math.abs(d)>200) continue; sum+=d*d; n++; }  // artifact reject
+  return n ? Math.sqrt(sum/n) : null;
+}
+function todayStr(){ return new Date().toISOString().slice(0,10); }
+function loadHrv(){ try{ return JSON.parse(localStorage.getItem('ic4hrv')||'[]'); }catch{ return []; } }
+function saveHrvReading(ln, rhr){
+  const hist=loadHrv().filter(r=>r.d!==todayStr());
+  hist.push({ d:todayStr(), ln:+ln.toFixed(1), rhr:Math.round(rhr) });
+  hist.sort((a,b)=>a.d<b.d?-1:1);
+  localStorage.setItem('ic4hrv', JSON.stringify(hist.slice(-60)));
+}
+function computeVerdict(lnToday){
+  const prior=loadHrv().filter(r=>r.d!==todayStr()).slice(-7);
+  if(prior.length<4) return { key:'base', label:`Building baseline (${prior.length}/4)`, mult:1, mode:'normal',
+    detail:'Need ~4 daily readings before HRV guidance kicks in — today is logged.' };
+  const xs=prior.map(r=>r.ln), mean=xs.reduce((a,b)=>a+b,0)/xs.length;
+  const sd=Math.sqrt(xs.reduce((a,b)=>a+(b-mean)**2,0)/xs.length) || 1;
+  const z=(lnToday-mean)/sd;
+  if(z>=-0.5) return { key:'green', label:'Green · go', mult:z>1?1.03:1, mode:'normal',
+    detail:`lnRMSSD ${lnToday.toFixed(1)} vs baseline ${mean.toFixed(1)} (z ${z.toFixed(1)}). Full intensity cleared.` };
+  if(z>=-1.5) return { key:'amber', label:'Amber · ease', mult:0.93, mode:'normal',
+    detail:`lnRMSSD ${lnToday.toFixed(1)} below baseline ${mean.toFixed(1)} (z ${z.toFixed(1)}). Targets trimmed ~7%.` };
+  return { key:'red', label:'Red · recover', mult:0.85, mode:'easy',
+    detail:`lnRMSSD ${lnToday.toFixed(1)} well below baseline ${mean.toFixed(1)} (z ${z.toFixed(1)}). Swapped to an endurance ride.` };
+}
+function setReadyUI(v, msg){
+  const b=$('readyBadge');
+  if(v){ b.textContent=v.label; b.className='ready-badge '+v.key; $('readyDetail').textContent=v.detail; }
+  else { b.textContent='Not checked'; b.className='ready-badge'; $('readyDetail').textContent=''; }
+  if(msg!==undefined) $('readyMsg').textContent=msg;
+}
+function applyVerdict(v){ readiness={mult:v.mult, mode:v.mode, verdict:v}; setReadyUI(v); renderPlan(); }
+
+// Manual override for when you disagree with the HRV call (e.g. feel great on a red day)
+function applyOverride(val){
+  if(val==='auto'){ if(autoVerdict) applyVerdict(autoVerdict); else { readiness={mult:1,mode:'normal',verdict:null}; setReadyUI(null); renderPlan(); } return; }
+  const map={
+    full:{ key:'green', label:'Manual · full',  mult:1,    mode:'normal', detail:'Manual override: full intensity (ignoring HRV).' },
+    trim:{ key:'amber', label:'Manual · trim',  mult:0.93, mode:'normal', detail:'Manual override: targets trimmed ~7%.' },
+    easy:{ key:'red',   label:'Manual · easy',  mult:0.85, mode:'easy',   detail:'Manual override: endurance ride.' },
+  };
+  applyVerdict(map[val]);
+}
+
+async function startReadiness(){
+  if(measuring) return;
+  try{
+    $('readyMsg').textContent='Connecting H10…';
+    const dev=await navigator.bluetooth.requestDevice({ filters:[{services:['heart_rate']}] });
+    const srv=await (await dev.gatt.connect()).getPrimaryService('heart_rate');
+    const ch=await srv.getCharacteristic('heart_rate_measurement');
+    await ch.startNotifications();
+    rrAll=[]; hrAll=[]; measuring=true; measT0=performance.now();
+    $('readyStart').textContent='Stop';
+    ch.addEventListener('characteristicvaluechanged', e=>{
+      if(!measuring) return;
+      const {hr,rr}=parseHRfull(e.target.value);
+      const t=(performance.now()-measT0)/1000;
+      if(hr) hrAll.push(hr);
+      if(t>=HRV_DISCARD) rr.forEach(x=>rrAll.push(x));     // discard settle period
+    });
+    measIv=setInterval(()=>{
+      const t=(performance.now()-measT0)/1000, left=Math.max(0,HRV_WINDOW-t), live=rmssd(rrAll);
+      $('readyMsg').textContent=`Measuring — sit still, breathe easy. ${Math.ceil(left)}s`
+        +(live?` · lnRMSSD ${(Math.log(live)*20).toFixed(1)}`:'')+(rrAll.length?` · ${rrAll.length} beats`:'');
+      if(t>=HRV_WINDOW) finishReadiness();
+    },1000);
+  }catch(err){ $('readyMsg').textContent='H10 error: '+err.message; measuring=false; $('readyStart').textContent='Check readiness (H10)'; }
+}
+function finishReadiness(){
+  measuring=false; if(measIv){ clearInterval(measIv); measIv=null; }
+  $('readyStart').textContent='Check readiness (H10)';
+  const r=rmssd(rrAll);
+  if(!r || rrAll.length<20){ $('readyMsg').textContent='Not enough clean beats — strap snug + electrodes wet, then retry.'; return; }
+  const ln=Math.log(r)*20;
+  const rhr=hrAll.length ? hrAll.reduce((a,b)=>a+b,0)/hrAll.length : 0;
+  saveHrvReading(ln, rhr);
+  autoVerdict=computeVerdict(ln); applyVerdict(autoVerdict);
+  if($('readyOverride')) $('readyOverride').value='auto';
+  $('readyMsg').textContent=`Done · lnRMSSD ${ln.toFixed(1)} · avg HR ${Math.round(rhr)} bpm`;
+}
+function toggleReadiness(){
+  if(!measuring){ startReadiness(); return; }
+  const t=(performance.now()-measT0)/1000;
+  if(t>=HRV_DISCARD+30) finishReadiness();                 // enough data → compute
+  else { measuring=false; if(measIv)clearInterval(measIv); $('readyStart').textContent='Check readiness (H10)'; $('readyMsg').textContent='Stopped (need ≥60s).'; }
+}
+
+/* ---------------- sound (subtle zone-change beep) ---------------- */
+let audioCtx=null, soundOn=true, lastBlockIdx=-1;
+function ensureAudio(){ if(!audioCtx){ try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }catch{} } if(audioCtx&&audioCtx.state==='suspended') audioCtx.resume(); }
+function tone(freq, when, dur){ const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.type='sine'; o.frequency.value=freq;
+  g.gain.setValueAtTime(0, when); g.gain.linearRampToValueAtTime(0.05, when+0.01); g.gain.exponentialRampToValueAtTime(0.0001, when+dur);
+  o.connect(g); g.connect(audioCtx.destination); o.start(when); o.stop(when+dur+0.02); }
+function playTones(freqs){ if(!soundOn||!audioCtx) return; const t0=audioCtx.currentTime; freqs.forEach((f,k)=>tone(f, t0+k*0.13, 0.16)); }
+function beepBlockChange(blk, prevIdx){
+  if(prevIdx===-1){ playTones([700]); return; }                 // first block
+  const cur=blockTargetWatts(blk,0), prev=blockTargetWatts(workout[prevIdx], workout[prevIdx].sec);
+  playTones(cur>prev ? [600,900] : [600,420]);                   // up = harder, down = easier
+}
+
+/* ---------------- resistance predictor (online fit, IC4) ----------------
+   Magnetic-brake model: power ≈ cadence × torque, torque ≈ a·resistance + b.
+   So fit y = P/C against x = R by least squares, then invert for a target.   */
+const RES_BLANK = {n:0,Sx:0,Sy:0,Sxx:0,Sxy:0,Rmin:1e9,Rmax:-1e9};
+let resFit = (()=>{ try{ return JSON.parse(localStorage.getItem('ic4resfit')) || {...RES_BLANK}; }catch{ return {...RES_BLANK}; } })();
+let lastResSample = 0;
+function saveResFit(){ localStorage.setItem('ic4resfit', JSON.stringify(resFit)); }
+function resAddSample(C, R, P){
+  if(C==null||R==null||P==null||C<40||P<10) return;
+  const x=R, y=P/C, f=resFit;
+  f.n++; f.Sx+=x; f.Sy+=y; f.Sxx+=x*x; f.Sxy+=x*y; f.Rmin=Math.min(f.Rmin,R); f.Rmax=Math.max(f.Rmax,R);
+}
+function resCoef(){
+  const f=resFit; if(f.n<20 || (f.Rmax-f.Rmin)<5) return null;
+  const d=f.n*f.Sxx - f.Sx*f.Sx; if(Math.abs(d)<1e-6) return null;
+  const a=(f.n*f.Sxy - f.Sx*f.Sy)/d, b=(f.Sy - a*f.Sx)/f.n;
+  return a>0 ? {a,b} : null;     // expect torque to rise with resistance
+}
+function predictResistance(targetW, cadence){
+  const c=resCoef(); if(!c || !cadence || cadence<40) return null;
+  const R=(targetW/cadence - c.b)/c.a;
+  return Math.round(Math.max(resFit.Rmin-5, Math.min(resFit.Rmax+10, R)));
+}
+function updateResBadge(){
+  const b=$('resModel'); if(!b) return; const c=resCoef();
+  if(c){ b.textContent=`Calibrated · n=${resFit.n}`; b.className='ready-badge green'; }
+  else { b.textContent=`Learning… n=${resFit.n}/20`; b.className='ready-badge base'; }
+}
+
+/* ---------------- generative music engine (Tone.js) ----------------
+   DSL: drums are 16-step strings ('x'=hit, '.'=rest); bass/lead are scale-degree
+   arrays. Styles pick a diatonic scale + a bank of chord progressions. Zone sets
+   an intensity that gates layers and opens a filter; tempo = target cadence.    */
+const MUSIC = (()=>{
+  let started=false, ready=false, style='house', rootMidi=45, vol=0.65, intensity=0.5, targetCad=90;
+  let inst={}, masterGain, filt, seq, scale=[0,2,3,5,7,8,10];
+  let bar=0, prog=[0,5,3,4], chordIdx=0, leadPat=[];
+
+  const SCALES={ minor:[0,2,3,5,7,8,10], dorian:[0,2,3,5,7,9,10], major:[0,2,4,5,7,9,11] };
+  const STYLES={
+    house:     { scale:'minor',  progs:[[0,5,3,4],[0,3,4,4],[5,3,0,4]], lead:false,
+                 kick:'x...x...x...x...', clap:'....x.......x...', hat:'..x...x...x...x.', open:'....x.......x...', bass:'x.x.x.x.x.x.x.x.', chords:true },
+    techno:    { scale:'minor',  progs:[[0,0,5,5],[0,6,0,6]], lead:false,
+                 kick:'x...x...x...x...', clap:'........x.......', hat:'x.x.x.x.x.x.x.x.', open:'..x...x...x...x.', bass:'x...x...x...x...', chords:false },
+    synthwave: { scale:'dorian', progs:[[0,5,3,4],[0,4,5,3],[3,4,0,0]], lead:true,
+                 kick:'x.......x.......', clap:'....x.......x...', hat:'x.x.x.x.x.x.x.x.', open:'', bass:'x..x..x.x..x..x.', chords:true },
+    dnb:       { scale:'minor',  progs:[[0,5,3,6],[0,6,5,3]], lead:true,
+                 kick:'x.....x...x.....', clap:'....x.......x...', hat:'xxxxxxxxxxxxxxxx', open:'', bass:'x.......x.......', chords:true },
+    lofi:      { scale:'dorian', progs:[[0,3,5,4],[0,4,3,5]], lead:false,
+                 kick:'x.......x.......', clap:'....x.......x...', hat:'..x...x...x...x.', open:'', bass:'x.....x...x.....', chords:true },
+  };
+  const rint=n=>Math.floor(Math.random()*n), pick=a=>a[rint(a.length)];
+  function deg(d, oct=0){ const L=scale.length; while(d<0){ d+=L; oct--; } oct+=Math.floor(d/L); d=((d%L)+L)%L; return Tone.Frequency(rootMidi+scale[d]+12*oct,'midi').toNote(); }
+  const triad=r=>[deg(r,1),deg(r+2,1),deg(r+4,1)];
+  function newLead(){ leadPat=[]; for(let i=0;i<16;i++) leadPat.push(Math.random()<0.4?rint(7):null); }
+  function applyStyle(){ const S=STYLES[style]; scale=SCALES[S.scale]; prog=pick(S.progs); chordIdx=0; newLead(); }
+
+  function build(){
+    masterGain=new Tone.Gain(vol).toDestination();
+    filt=new Tone.Filter(1200,'lowpass').connect(masterGain); filt.Q.value=1;
+    inst.kick=new Tone.MembraneSynth({octaves:6, pitchDecay:0.04}).connect(filt);
+    const clapBP=new Tone.Filter(1600,'bandpass').connect(filt);
+    inst.clap=new Tone.NoiseSynth({envelope:{attack:0.001,decay:0.16,sustain:0}}); inst.clap.connect(clapBP); inst.clap.volume.value=-7;
+    const hatHP=new Tone.Filter(7500,'highpass').connect(filt);
+    inst.hat=new Tone.NoiseSynth({envelope:{attack:0.001,decay:0.03,sustain:0}}); inst.hat.connect(hatHP); inst.hat.volume.value=-12;
+    inst.bass=new Tone.MonoSynth({oscillator:{type:'sawtooth'}, envelope:{attack:0.005,decay:0.2,sustain:0.4,release:0.2}, filterEnvelope:{attack:0.01,decay:0.2,baseFrequency:120,octaves:2.5}}).connect(filt);
+    inst.chord=new Tone.PolySynth(Tone.Synth,{oscillator:{type:'fatsawtooth'}, envelope:{attack:0.02,decay:0.3,sustain:0.5,release:0.6}}).connect(filt); inst.chord.volume.value=-14;
+    inst.lead=new Tone.Synth({oscillator:{type:'square'}, envelope:{attack:0.01,decay:0.1,sustain:0.2,release:0.1}}).connect(filt); inst.lead.volume.value=-12;
+    ready=true;
+  }
+  function step(time, s){
+    const S=STYLES[style], I=intensity, on=(p,i)=>p&&p[i]&&p[i]!=='.';
+    if(s===0){ bar++; chordIdx=(chordIdx+1)%prog.length; if(bar%4===0){ prog=pick(S.progs); newLead(); } }
+    const r=prog[chordIdx];
+    if(I>0.12 && on(S.kick,s)) inst.kick.triggerAttackRelease('C1','8n',time,0.9);
+    if(I>0.25 && on(S.clap,s)) inst.clap.triggerAttackRelease('16n',time,0.7);
+    if(I>0.32 && on(S.hat,s))  inst.hat.triggerAttackRelease('32n',time, I>0.7?0.6:0.35);
+    if(I>0.5  && on(S.open,s)) inst.hat.triggerAttackRelease('16n',time,0.4);
+    if(I>0.4  && on(S.bass,s)) inst.bass.triggerAttackRelease(deg(r,-1),'8n',time,0.85);
+    if(I>0.3  && S.chords && (s===0||s===8)) inst.chord.triggerAttackRelease(triad(r),'2n',time,0.5);
+    if(I>0.7  && S.lead && leadPat[s]!=null) inst.lead.triggerAttackRelease(deg(r+leadPat[s],1),'16n',time,0.5);
+  }
+  const zoneI=z=>({Z1:0.18,Z2:0.40,Z3:0.60,Z4:0.82,Z5:0.95,Z6:1.0}[z] ?? 0.5);
+  const clampBpm=b=>Math.max(60,Math.min(175,b));
+
+  return {
+    ok(){ return typeof Tone!=='undefined'; },
+    async start(){ if(!this.ok()) return false; await Tone.start(); if(!ready) build(); applyStyle();
+      Tone.Transport.bpm.value=clampBpm(targetCad);
+      if(!seq){ seq=new Tone.Sequence((t,s)=>step(t,s), [...Array(16).keys()], '16n'); seq.start(0); }
+      if(Tone.Transport.state!=='started') Tone.Transport.start(); started=true; return true; },
+    setBlock(blk){ targetCad=blk.cadence||90; intensity=zoneI(blk.zone);
+      if(ready){ Tone.Transport.bpm.rampTo(clampBpm(targetCad),2); filt.frequency.rampTo(400+intensity*5200,1.5); } },
+    setStyle(s){ style=s; if(ready&&started) applyStyle(); },
+    setKey(m){ rootMidi=m; },
+    setVol(v){ vol=v; if(masterGain) masterGain.gain.rampTo(v,0.2); },
+    pause(){ if(started) Tone.Transport.pause(); },
+    resume(){ if(started) Tone.Transport.start(); },
+    stop(){ if(started){ Tone.Transport.stop(); Tone.Transport.position=0; bar=0; started=false; } },
+  };
+})();
+let musicOn=false;
+
+/* ---------------- wire up ---------------- */
+$('connect').onclick=connectBike;
+$('connect-hr').onclick=connectHR;
+$('gen').onclick=renderPlan;
+$('start').onclick=start;
+$('pause').onclick=togglePause;
+$('skip').onclick=skip;
+$('reset').onclick=reset;
+$('pip').onclick=popOut;
+$('sound').onclick=()=>{ soundOn=!soundOn; $('sound').textContent=soundOn?'🔔 On':'🔕 Off'; if(soundOn){ ensureAudio(); playTones([700]); } };
+$('readyStart').onclick=toggleReadiness;
+$('readyOverride').onchange=e=>applyOverride(e.target.value);
+$('musicToggle').onclick=async ()=>{
+  musicOn=!musicOn; $('musicToggle').textContent=musicOn?'🎵 On':'🎵 Off';
+  if(musicOn){
+    MUSIC.setStyle($('musicStyle').value); MUSIC.setKey(+$('musicKey').value); MUSIC.setVol((+$('musicVol').value)/100);
+    const cb=running?currentBlock(elapsed()):null; MUSIC.setBlock(cb?cb.blk:{cadence:90,zone:'Z2'});
+    const ok=await MUSIC.start();
+    $('musicMsg').textContent = ok ? `Generating ${$('musicStyle').value} @ ${cb?Math.round(cb.blk.cadence):90} bpm` : 'Tone.js failed to load (need internet).';
+    if(!ok){ musicOn=false; $('musicToggle').textContent='🎵 Off'; }
+  } else { MUSIC.stop(); $('musicMsg').textContent=''; }
+};
+$('musicStyle').onchange=e=>{ MUSIC.setStyle(e.target.value); if(musicOn) $('musicMsg').textContent='Style: '+e.target.value; };
+$('musicKey').onchange=e=>MUSIC.setKey(+e.target.value);
+$('musicVol').oninput=e=>MUSIC.setVol((+e.target.value)/100);
+$('resReset').onclick=()=>{ resFit={...RES_BLANK}; saveResFit(); updateResBadge(); };
+if (localStorage.getItem('ic4ftp')) $('ftp').value=localStorage.getItem('ic4ftp');
+if (localStorage.getItem('ic4dur')) $('dur').value=localStorage.getItem('ic4dur');
+if (!navigator.bluetooth) { $('status').textContent='No Web Bluetooth — use desktop Chrome/Edge.'; $('connect').disabled=true; }
+(function initReadiness(){      // restore today's verdict if already measured
+  const today=loadHrv().find(r=>r.d===todayStr());
+  if(today){ autoVerdict=computeVerdict(today.ln); applyVerdict(autoVerdict); $('readyMsg').textContent=`Today logged · lnRMSSD ${today.ln} · RHR ${today.rhr} bpm`; }
+})();
+updateResBadge();
+renderPlan();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
