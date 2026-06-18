@@ -33,7 +33,7 @@
   .metric .arrow { font-size:1.6rem; font-weight:800; }
   .on { color:#4ade80; } .under { color:#fbbf24; } .over { color:#f87171; }
 
-  .secondary { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:12px; }
+  .secondary { display:grid; grid-template-columns:repeat(auto-fit,minmax(76px,1fr)); gap:10px; margin-top:12px; }
   .secondary .metric .cur { font-size:clamp(1.3rem, 6vw, 1.8rem); }
   .secondary .metric .tgt { font-size:.8rem; }
 
@@ -70,7 +70,7 @@
     #status { margin-left:0; flex-basis:100%; }
   }
   @media (max-width: 380px) {
-    .secondary { grid-template-columns:repeat(3, 1fr); }
+    .secondary { grid-template-columns:repeat(2, 1fr); }
     .secondary .metric .lab { font-size:.68rem; }
   }
 </style>
@@ -147,6 +147,7 @@
       <div class="metric"><div class="lab">Heart rate</div><div class="cur" id="hrCur">—</div></div>
       <div class="metric"><div class="lab">Resistance</div><div class="cur" id="rCur">—</div><div class="tgt" id="rTgt"></div></div>
       <div class="metric"><div class="lab">Speed (km/h)</div><div class="cur" id="sCur">—</div></div>
+      <div class="metric"><div class="lab">kcal</div><div class="cur" id="eCur">0</div></div>
     </div>
 
     <div class="progress"><div id="progBar"></div></div>
@@ -398,7 +399,7 @@ function renderPlan() {
 }
 
 /* ---------------- run clock ---------------- */
-let running=false, paused=false, startMs=0, pausedMs=0, pauseStart=0, skipShift=0, segEls=[], rec=[], wakeLock=null, autoPausedIdle=false, lastMoveMs=0, autoStart=true, armed=true;
+let running=false, paused=false, startMs=0, pausedMs=0, pauseStart=0, skipShift=0, segEls=[], rec=[], wakeLock=null, autoPausedIdle=false, lastMoveMs=0, autoStart=true, armed=true, kj=0;
 function elapsed() { if (!running) return 0; const now=performance.now(); const p = paused ? now-pauseStart : 0; return (now - startMs - pausedMs - p)/1000 + skipShift; }
 function currentBlock(t) {
   let acc=0; for (let i=0;i<workout.length;i++){ if (t < acc+workout[i].sec) return {blk:workout[i], i, tIn:t-acc, tLeft:acc+workout[i].sec-t}; acc+=workout[i].sec; }
@@ -431,7 +432,8 @@ function tick() {
     resAddSample(cSm, rSm, pSm);
     if (resFit.n % 5 === 0) saveResFit();
     updateResBadge();
-    if (running && !paused) rec.push({t:Math.round(elapsed()), p:Math.round(pSm||0), c:Math.round(cSm||0), h:Math.round(state.hr||0), d:(state.distance!=null?state.distance:null), v:Math.round((sSm||0)*10)/10});
+    if (running && !paused) { kj += (pSm||0)/1000; rec.push({t:Math.round(elapsed()), p:Math.round(pSm||0), c:Math.round(cSm||0), h:Math.round(state.hr||0), d:(state.distance!=null?state.distance:null), v:Math.round((sSm||0)*10)/10}); }
+    $('eCur').textContent = Math.round(kj);
   }
 
   // auto-pause when you stop pedaling; auto-resume when you start again
@@ -494,7 +496,7 @@ function tick() {
   requestAnimationFrame(tick);
 }
 
-function start(){ if (!workout.length) renderPlan(); ensureAudio(); lastBlockIdx=-1; running=true; armed=false; paused=false; startMs=performance.now(); pausedMs=0; skipShift=0; rec=[]; lastMoveMs=performance.now(); autoPausedIdle=false; acquireWake();
+function start(){ if (!workout.length) renderPlan(); ensureAudio(); lastBlockIdx=-1; running=true; armed=false; paused=false; startMs=performance.now(); pausedMs=0; skipShift=0; rec=[]; kj=0; lastMoveMs=performance.now(); autoPausedIdle=false; acquireWake();
   if(musicOn) MUSIC.start();
   $('start').disabled=true; $('pause').disabled=false; $('skip').disabled=false; $('reset').disabled=false; }
 function togglePause(){ if (!running) return; if (!paused){ paused=true; pauseStart=performance.now(); $('pause').textContent='Resume'; if(musicOn) MUSIC.pause(); }
@@ -527,6 +529,7 @@ function exportTCX(){
   let integ=0, prevT=rec[0].t, lastD=0;
   const distAt = rec.map(s=>{ if(useBikeDist){ if(s.d!=null) lastD=s.d; return lastD; } integ += Math.max(0,s.v||0)/3.6 * Math.max(0,s.t-prevT); prevT=s.t; return integ; });
   const d0 = distAt[0]||0, total = Math.max(0, (distAt[distAt.length-1]||0) - d0);
+  const kcal = Math.round(rec.reduce((a,s)=>a+(s.p||0),0)/1000);   // kJ of work ≈ kcal
   const pts=rec.map((s,i)=>`<Trackpoint><Time>${new Date(base+s.t*1000).toISOString()}</Time>`+
     `<DistanceMeters>${Math.round(Math.max(0,distAt[i]-d0))}</DistanceMeters>`+
     (s.h?`<HeartRateBpm><Value>${s.h}</Value></HeartRateBpm>`:'')+
@@ -535,7 +538,7 @@ function exportTCX(){
   const xml=`<?xml version="1.0" encoding="UTF-8"?>\n`+
     `<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2" xmlns:ns3="http://www.garmin.com/xmlschemas/ActivityExtension/v2">`+
     `<Activities><Activity Sport="Biking"><Id>${startIso}</Id>`+
-    `<Lap StartTime="${startIso}"><TotalTimeSeconds>${rec.length}</TotalTimeSeconds><DistanceMeters>${Math.round(total)}</DistanceMeters><Intensity>Active</Intensity><TriggerMethod>Manual</TriggerMethod>`+
+    `<Lap StartTime="${startIso}"><TotalTimeSeconds>${rec.length}</TotalTimeSeconds><DistanceMeters>${Math.round(total)}</DistanceMeters><Calories>${kcal}</Calories><Intensity>Active</Intensity><TriggerMethod>Manual</TriggerMethod>`+
     `<Track>${pts}</Track></Lap></Activity></Activities></TrainingCenterDatabase>`;
   const url=URL.createObjectURL(new Blob([xml],{type:'application/vnd.garmin.tcx+xml'}));
   const a=document.createElement('a'); a.href=url; a.download=`cycler-${startIso.slice(0,10)}.tcx`; a.click(); URL.revokeObjectURL(url);
