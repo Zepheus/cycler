@@ -458,14 +458,15 @@ function tick() {
   $('clock').textContent = fmt(tLeft);
   const nxt = workout[i+1];
   $('nextUp').textContent = nxt ? `Next: ${nxt.name} · ${nxt.zone==='Z1'?'recover':blockTargetWatts(nxt,0)+' W'} (${fmt(nxt.sec)})` : 'Last block — finish strong';
-  if (voiceOn) {
-    if (nxt && !vAnnounced && tLeft<=6) {                 // ~6s out so the sentence + 3-2-1 land on time
-      vAnnounced=true;
+  if (voiceOn && nxt) {
+    if (!vAnnounced) {
       const nw=blockTargetWatts(nxt,0), nR=predictResistance(nw, nxt.cadence);
       const what = ['Z1','Z2'].includes(nxt.zone) ? (/recov/i.test(nxt.name)?'recovery':'easy spin') : `${nw} watts`;
-      say(nR!=null ? `Next, ${what}. Set resistance to ${nR}, in` : `Next, ${what}, in`);
+      const lead = nR!=null ? `Next, ${what}. Set resistance to ${nR}, in` : `Next, ${what}, in`;
+      // start the lead-in so it finishes right at the 3-count — else the queued "3,2,1" plays late
+      if (tLeft <= 3 + estSpeechDur(lead)) { vAnnounced=true; say(lead); }
     }
-    if (nxt) { const cd=Math.ceil(tLeft); if (cd>=1 && cd<=3 && cd!==vCountLast) { vCountLast=cd; say(String(cd)); } }  // …3, 2, 1
+    const cd=Math.ceil(tLeft); if (cd>=1 && cd<=3 && cd!==vCountLast) { vCountLast=cd; say(String(cd)); }  // …3, 2, 1
   }
 
   $('pTgt').textContent = tgtW;
@@ -821,6 +822,8 @@ let musicOn=false;
 
 /* ---------------- voice coaching (Web Speech API) ---------------- */
 let voiceOn=true, ttsVoice=null, vAnnounced=false, vCountLast=0;
+let speechCps=13;   // chars/sec, self-calibrates from real utterance timing (rate 1.08)
+function estSpeechDur(text){ return text.length/speechCps + 0.25; }   // +margin so it lands just before the 3-count
 function ttsVoices(){ return ('speechSynthesis' in window) ? speechSynthesis.getVoices() : []; }
 function ttsScore(v){ const n=v.name.toLowerCase();
   if(/google uk english male/.test(n)) return 5;        // best available on Chrome/macOS, default it
@@ -840,6 +843,10 @@ function say(text, urgent){
   const u=new SpeechSynthesisUtterance(text);
   if(ttsVoice) u.voice=ttsVoice;
   u.rate=1.08; u.pitch=1.06; u.volume=1;
+  if(text.length>=12){                                   // calibrate cps from longer phrases (skip the 1-char counts)
+    let t0=0; u.onstart=()=>{ t0=performance.now(); };
+    u.onend=()=>{ if(t0){ const cps=text.length/((performance.now()-t0)/1000); if(cps>4&&cps<40) speechCps=speechCps*0.7+cps*0.3; } };
+  }
   speechSynthesis.speak(u);
 }
 function announceText(b){
